@@ -1,44 +1,75 @@
 # STT Floater
 
-Dictate from your Android phone into any Windows window over Tailscale. Originally built to make voice input work inside RealVNC sessions running [Claude Code](https://claude.com/claude-code) — where typing with the Android keyboard is miserable.
+Dictate from your Android phone into your Windows PC or directly into a live tmux session, over Tailscale. Originally built to drive [Claude Code](https://claude.com/claude-code) conversations running in PowerShell or WSL tmux without typing on the Android keyboard.
 
-Tap a floating bubble on your phone, speak, tap again. Audio is uploaded over your Tailnet, transcribed by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) running on your PC, and pasted into whichever window has focus.
+Tap a floating bubble on your phone, speak, tap again. Audio is uploaded over your Tailnet, transcribed by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on your PC, and delivered to one of three places depending on your settings:
+
+1. **PC** — pasted into whichever Windows window is focused (original mode).
+2. **Phone clipboard** — copied to Android's clipboard for you to paste anywhere on the phone.
+3. **tmux session** — typed directly into a named tmux session running on your PC via `tmux send-keys`, no window focus required.
+
+The floating bubble shows a live pill under the mic indicating where your text will go (`→ ses3`, `→ 📋`, or nothing for PC mode).
 
 ## The problem this solves
 
-If you have a Windows PC running interactive CLIs like [Claude Code](https://claude.com/claude-code) inside PowerShell, and you access that PC from your Android phone via **RealVNC** over **Tailscale**, typing through the Android keyboard inside a remote-desktop session is painfully slow. You already have a great microphone on your phone; this app turns it into a dictation bridge for whichever PC window currently has focus.
+You have a Windows PC running interactive CLIs like [Claude Code](https://claude.com/claude-code). You access the PC from your Android phone or tablet — maybe via RealVNC, maybe via SSH-into-tmux from Termux. Typing through the Android keyboard inside a remote-desktop session is painful, and even in SSH it's slow.
 
-The concrete scenario it was built for:
-
-- Windows desktop with multiple monitors and several PowerShell windows, each running Claude Code.
-- Phone on the same Tailnet, viewing the PC through RealVNC.
-- User wants to speak a prompt on the phone and have it appear in a specific PowerShell window — without touching the phone keyboard or leaving the remote-desktop view.
-
-The floating bubble draws **on top of** RealVNC (and anything else), so dictation is always one tap away.
+This app turns your phone's microphone into a dictation bridge, with three routing modes so you can pick what fits: paste into the focused Windows window, copy to phone clipboard, or write directly into a named tmux session shared across all attached devices.
 
 ## How this was built
 
-Most of the code in this repository was written by **[Claude Code](https://claude.com/claude-code) powered by Claude Opus 4.7** (Anthropic's CLI coding assistant). The maintainer [@kevinkicho](https://github.com/kevinkicho) described the goal, ran every build on a real Galaxy S22 + Windows 11 setup, and fed concrete feedback — observed errors, toast messages, wrong behaviors — back to Claude for each iteration. Claude handled the architecture, the Kotlin / Python / XML, the ADB / Gradle plumbing, and diagnosed the design pivots.
+All of the code in this repo was written by **[Claude Code](https://claude.com/claude-code) powered by Claude Opus 4.7** (Anthropic's CLI coding assistant). The maintainer [@kevinkicho](https://github.com/kevinkicho) described the need, ran every build on a real Galaxy S22 Ultra + Galaxy Tab S7 + Windows 11 setup, and fed concrete feedback — observed errors, toast messages, wrong behaviors — back to Claude for each iteration. Claude handled the architecture, the Kotlin / Python / XML, the ADB / Gradle plumbing, and diagnosed the design pivots along the way.
 
-Notable iteration: the first approach used Android's `SpeechRecognizer` directly. After observing it fail on the S22 (Bixby starving the mic, then `NO_MATCH` even with Google's on-device recognizer), the project pivoted to recording raw audio with `AudioRecord` and transcribing server-side with Whisper. That pivot was driven by feedback from real device testing, not speculation.
+Notable design pivots, all driven by real-device testing:
+
+- First approach used Android's `SpeechRecognizer` directly. On a Galaxy S22, Bixby starved the mic and all three recognizer paths failed — pivoted to recording raw audio with `AudioRecord` and transcribing server-side with Whisper.
+- First output path only pasted into the focused Windows window via `pyautogui`. Added clipboard mode and then tmux-send-keys mode as use cases expanded beyond RealVNC.
+- For other Android apps (not Termux), added an Accessibility Service that finds the focused editable field, sets text, and clicks the app's Send button (multilingual keyword match: en/ko/ja/zh/es/fr/de/it/ru).
 
 Treat this as working but lightly reviewed code. PRs welcome.
 
 ## How it works
 
 ```
-[Android]                              [Windows PC]
-  tap bubble  ──── WAV over HTTP ────▶  Flask server
-                   (Tailscale)             │
-                                           ▼
-                                     faster-whisper
-                                           │
-                                           ▼
-                                  clipboard + Ctrl+V
-                                  (into focused window)
+[Android phone]                              [Windows PC]
+  tap bubble → record WAV
+                                ↓ over Tailscale HTTP
+                                        Flask server (:8080)
+                                              │
+                                              ▼
+                                         faster-whisper
+                                              │
+                                              ▼
+                          ┌───────────────────┼────────────────────┐
+                          ▼                   ▼                    ▼
+                   pyautogui paste    clipboard+\n back       tmux send-keys
+                   (PC focused win)   to phone clipboard      -t <session>
 ```
 
-One tap to start recording, another to stop and send. Drag the bubble to reposition it. Leave the server running in the background on your PC.
+Routing is decided per-utterance by request headers:
+
+- `X-Tmux-Session: ses3` or `auto` → tmux send-keys. Highest priority; skips everything else.
+- `X-Paste: false` → skip PC paste. The phone app enables this in clipboard mode and writes the returned text locally.
+- Default → PC paste into focused window, optionally followed by Enter.
+
+## Routing modes
+
+### 1. PC paste mode (default)
+
+Transcript is typed into whichever Windows window has focus. Good if you're working on PC, bad if you're away from the PC and don't want to juggle focus. Press Enter after paste is on by default.
+
+### 2. Phone clipboard mode
+
+Transcript comes back to the phone and goes into Android's clipboard. You long-press → Paste in any app (Termux, Messages, Chrome, etc). If **"Then paste in & press enter"** is on:
+
+- Clipboard has a trailing `\n` so paste in Termux submits in one action.
+- An **Accessibility Service** (if you've enabled it once in Android Settings) finds the focused input field in non-Termux apps, performs Set-Text, and clicks the app's Send button — fully hands-free. Works in Messages, Chrome, Notes, KakaoTalk, etc. Termux's custom TerminalView ignores the accessibility paste, so it falls back to the clipboard flow.
+
+### 3. Tmux send-keys mode (recommended for Claude Code workflows)
+
+Transcript is written **directly into a named tmux session** via `wsl -d Ubuntu -- tmux send-keys -t <session> "<text>" Enter`. Because the tmux session is shared across every attached device (phone Termux, tablet Termux, PC Windows Terminal), the text appears simultaneously on all of them. Doesn't care what PC window is focused, doesn't need accessibility, doesn't need manual paste.
+
+**Auto-detect:** when **"Auto-detect active tmux session"** is on in the phone app, the overlay polls the PC every 4 seconds for the most-recently-attached session (`tmux list-sessions -F '#{session_last_attached} #{session_name}'`) and shows it live in the pill under the mic. SSH into a different session on the phone and within ~4 s the pill updates to match. One less thing to configure.
 
 ## Why not Android's SpeechRecognizer?
 
@@ -46,15 +77,16 @@ Short answer: on Galaxy devices, Samsung's Bixby service holds the microphone an
 
 ## Requirements
 
-**PC (Windows):**
+**PC (Windows 10/11):**
 - Python 3.10 or newer
 - Tailscale, logged in
+- WSL + Ubuntu + `tmux` (only needed for tmux-send-keys mode)
 - ~500 MB free disk (Whisper model cache)
 
 **Phone (Android):**
 - Android 8.0 / API 26 or newer
 - Tailscale, logged in
-- Android Studio (to build the APK once)
+- Android Studio (one-time, to build the APK)
 
 ## Setup
 
@@ -69,7 +101,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-First launch downloads the Whisper `base.en` model (~150 MB) and preloads it. The server binds to all interfaces on port 8080 so Tailscale can reach it. For a one-click launcher on Windows, `start.bat` handles venv creation and dependency install.
+First launch downloads the Whisper `base.en` model (~150 MB) and preloads it. The server binds to all interfaces on port 8080 so Tailscale can reach it. `start.bat` is a one-click launcher that handles venv creation + dep install.
 
 Find your PC's Tailscale IP:
 
@@ -79,9 +111,7 @@ tailscale ip -4
 
 ### 2. Build and install the Android app
 
-Open `stt-android/` in Android Studio, connect your phone via USB with USB debugging enabled, and click **Run**. The app installs as **STT Floater**.
-
-Command-line alternative:
+Open `stt-android/` in Android Studio, connect your phone via USB with USB debugging enabled, click **Run**. Command-line alternative:
 
 ```
 cd stt-android
@@ -93,16 +123,32 @@ gradlew installDebug
 1. Launch **STT Floater**.
 2. **Server URL**: `http://<your-tailscale-ip>:8080`
 3. **Token**: must match `STT_TOKEN` on the PC (default `change-me`).
-4. Tap **Start floating bubble**. Grant microphone, notification, and "Display over other apps" permissions as prompted.
+4. Tap **Start floating bubble**. Grant microphone, notification, and "Display over other apps" permissions when prompted.
 
-## Usage
+### 4. (Optional) Enable auto-paste for non-Termux apps
 
-1. In RealVNC (or whatever you use), tap the window on your PC that should receive the text — giving it focus.
-2. Tap the floating 🎤 bubble on your phone.
-3. Speak.
-4. Tap the bubble again.
+To have transcripts auto-typed + sent in apps like Messages, Chrome, KakaoTalk:
 
-After ~1–2 seconds the transcribed text pastes into the focused window. Toggle **Press Enter after sending** in the app if you want automatic submission.
+1. On the phone: **Settings → Accessibility → Installed apps** (or "Downloaded services").
+2. Tap **"STT Floater auto-paste"** → flip **On**.
+3. Accept Android's accessibility warning.
+
+The service only activates when **"Copy to clipboard after transcribing"** and **"Then paste in & press enter"** are both on in the app. It finds the focused editable field, calls `ACTION_SET_TEXT`, then scans the window for a Send button (matches `send` / `보내기` / `送信` / and other language keywords) and clicks it.
+
+### 5. (Optional) Enable tmux-send-keys mode
+
+1. In the phone app, flip **"Auto-detect active tmux session"** → On.
+2. Stop and Start the bubble so it picks up the new pref.
+3. The pill under the mic shows `→ (searching…)` then updates to `→ ses3` (or whatever session is most-recently attached).
+4. SSH into a different tmux session from phone Termux → within ~4 s the pill updates.
+5. Tap the mic, speak, tap again — text + Enter lands in that tmux session, visible on every attached device.
+
+## Usage cheatsheet
+
+- **Want text in a Windows app (Word, browser, etc.)?** Disable auto-detect and clipboard. Click the target window on PC. Tap bubble, speak, tap.
+- **Want text in a specific tmux session (ses1, ses2, ses3, ...)?** Enable auto-detect. Make sure you've SSH'd into that session at least once recently so tmux marks it "last attached." Pill should show it. Tap, speak, tap.
+- **Want text in Messages / Chrome / Notes?** Enable clipboard + "Then paste in & press enter", enable Accessibility service once. Tap compose field, tap bubble, speak, tap. Text + Send is automatic.
+- **Want text in Termux outside of tmux-send-keys mode?** Enable clipboard + "Then paste in & press enter". Tap bubble, speak, tap. Long-press in Termux → Paste. The trailing `\n` submits.
 
 ## Configuration
 
@@ -112,110 +158,118 @@ Environment variables on the PC server:
 |---|---|---|
 | `STT_TOKEN` | `change-me` | Shared secret — must match the Android app |
 | `STT_PORT` | `8080` | Listen port |
-| `WHISPER_MODEL` | `base.en` | Try `small.en` for better quality, `tiny.en` for speed. Drop the `.en` suffix for multilingual |
+| `WSL_DISTRO` | `Ubuntu` | WSL distro for tmux send-keys |
+| `WHISPER_MODEL` | `base.en` | Try `small.en` for better quality, `tiny.en` for speed. Drop `.en` for multilingual |
 | `WHISPER_DEVICE` | `cpu` | Set to `cuda` for an NVIDIA GPU |
 | `WHISPER_COMPUTE` | `int8` | Use `float16` with CUDA |
-| `WHISPER_LANGUAGE` | `en` | Set empty for auto-detect |
+| `WHISPER_LANGUAGE` | `en` | Empty for auto-detect |
 
 ## API
 
-- `POST /send` — JSON `{text, submit, token}`. Pastes text directly. Used by the PWA client.
-- `POST /transcribe_and_send` — raw `audio/wav` body, `X-Token` header, optional `X-Submit` and `X-Paste` headers. Used by the Android app.
 - `GET /health` — returns `{ok, whisper_loaded}`.
+- `GET /active_session` (header `X-Token`) — returns `{ok, session}` with the most-recently-attached tmux session name, or empty string if none.
+- `POST /send` — JSON `{text, submit, token}`. Pastes text directly (used by the PWA).
+- `POST /transcribe_and_send` — raw `audio/wav` body. Headers:
+  - `X-Token`: auth
+  - `X-Submit`: `true` / `false` — press Enter after paste (PC mode only)
+  - `X-Paste`: `true` / `false` — set to `false` to skip the PC paste (clipboard mode uses this)
+  - `X-Tmux-Session`: `auto`, specific name, or omitted. If set, routes via `tmux send-keys` and skips PC paste.
 
-Both paste endpoints target the currently focused Windows window. They do not choose a window themselves — tap the right window first.
+Response always includes `{ok, text, chars, tmux_target?}` so the phone can display or clipboard-copy the transcript.
 
 ## Security
 
 - The token is a low bar. Anything on your Tailnet can reach the server; for a personal Tailnet that is fine.
 - Do not expose port 8080 to the public internet.
 - Windows Firewall will prompt on first run — allow on **Private** networks.
+- Accessibility Service has broad permissions on Android. Only enable the STT Floater service; disable it if you uninstall the app.
 
 ## Alternate client: browser PWA
 
-`static/index.html` is a minimal browser client that uses the Web Speech API for transcription and posts to `/send`. It works in Chrome on Android, but requires HTTPS for microphone access. Easiest path is `tailscale serve` to get a Let's Encrypt cert:
+`static/index.html` is a minimal browser client that uses the Web Speech API for transcription and posts to `/send`. Works in Chrome on Android, requires HTTPS for microphone access. Easiest path is `tailscale serve`:
 
 ```
 tailscale serve --bg --https=443 http://localhost:8080
 ```
 
-Then open `https://<machine>.tail-xxxx.ts.net/` on the phone. The native app is recommended — it uses Whisper (better quality) and can float over other apps, which the PWA cannot.
+Then open `https://<machine>.tail-xxxx.ts.net/` on the phone. The native app is strongly recommended over this — better quality (Whisper) and can float over other apps (PWAs cannot).
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Toast: **`no protocol`** | Missing `http://` in URL. The app auto-prepends it now; re-save settings. |
-| Toast: **`http 401`** | Token mismatch between app and server. |
-| Transcribing… then timeout | Windows Firewall blocking port 8080. Allow on **Private networks**. |
+| Toast `no protocol` | Missing `http://` in URL. The app auto-prepends it now; re-save settings. |
+| Toast `http 401` | Token mismatch between app and server. |
+| `Transcribing…` then timeout | Windows Firewall blocking port 8080. Allow on **Private networks**. |
 | Transcription is empty | Tapped twice too fast. Record at least one second of clear speech. |
-| Wrong window got the text | Click the target window *before* tapping the bubble. |
+| PC paste mode → wrong window got the text | Click the target window *before* tapping the bubble. |
+| Pill shows `→ (searching…)` forever | No tmux session is currently attached on the PC. Run `tmux attach -t ses3` (or `ses3` if using Claude Sessions) on the PC or phone first. |
+| Auto-paste works in Messages but not KakaoTalk | Add more Send button keywords to `SttAccessibilityService.findSendButton()`. Default covers en/ko/ja/zh/es/fr/de/it/ru. |
+| Enter doesn't fire in some app | That app uses Enter for newline (chat apps often do). The Accessibility Service tries a Send button match first; if no match it falls back to `ACTION_IME_ENTER`. If neither works, dump the accessibility tree (`adb shell uiautomator dump`) and add the app's Send-button description to the keyword list. |
 
 ## File-by-file reference
 
-Every file and function, one line each.
-
 ### PC server (root of repo)
 
-**`server.py`** — Flask app + Whisper loader.
-- `get_whisper()` — lazily loads the `faster-whisper` model on first call and caches it as a module-level singleton.
-- `paste_into_focused_window(text, submit)` — copies text to the Windows clipboard, simulates `Ctrl+V`, optionally presses Enter.
-- `index()` — serves `static/index.html` (the PWA client).
-- `health()` — returns `{ok: true, whisper_loaded: bool}` for diagnostics.
-- `send()` — accepts JSON `{text, submit, token}` and pastes the text directly (used by the PWA).
-- `transcribe_and_send()` — accepts a raw `audio/wav` body, runs Whisper on it, and pastes the transcript (used by the Android app).
-- `_preload()` — background thread started at launch that primes Whisper so the first real request is fast.
+**`server.py`** — Flask app + Whisper + tmux router.
+- `get_whisper()` — lazily loads the `faster-whisper` model on first call, caches it.
+- `paste_into_focused_window(text, submit)` — clipboard + `Ctrl+V` + optional Enter (via pyautogui).
+- `resolve_tmux_target(target)` — resolves `'auto'` to the most-recently-attached tmux session by parsing `tmux list-sessions -F '#{session_last_attached} #{session_name}'`.
+- `tmux_send(session, text)` — runs `tmux send-keys -t <session> -l <text>` then `tmux send-keys -t <session> Enter`. Literal-text mode avoids tmux key-name misinterpretation.
+- `index()` — serves the PWA.
+- `health()` — diagnostics.
+- `active_session()` — returns the currently-auto-resolvable tmux session (used by the phone's live pill).
+- `send()` — JSON text → PC paste.
+- `transcribe_and_send()` — audio → Whisper → routes to tmux / clipboard / PC paste based on headers.
+- `_preload()` — background-thread Whisper warm-up.
 
-**`requirements.txt`** — Python dependencies: Flask, pyperclip, pyautogui, faster-whisper.
+**`requirements.txt`** — Flask, pyperclip, pyautogui, faster-whisper.
 
-**`start.bat`** — Windows one-click launcher; creates a `.venv`, installs deps, sets `STT_TOKEN`, runs `server.py`.
+**`start.bat`** — Windows one-click launcher.
 
-**`static/index.html`** — alternate PWA client that uses the Web Speech API and posts transcripts to `/send`.
+**`static/index.html`** — PWA client (text-only, alternate).
 
 ### Android app (`stt-android/`)
 
-**`app/src/main/AndroidManifest.xml`** — declares permissions (`INTERNET`, `RECORD_AUDIO`, `SYSTEM_ALERT_WINDOW`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS`), `MainActivity`, and `OverlayService` with `foregroundServiceType="microphone"`.
+**`AndroidManifest.xml`** — permissions (`INTERNET`, `RECORD_AUDIO`, `SYSTEM_ALERT_WINDOW`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS`), `MainActivity`, `OverlayService` (`foregroundServiceType="microphone"`), and `SttAccessibilityService` with `BIND_ACCESSIBILITY_SERVICE`.
 
-**`MainActivity.kt`** — settings screen (server URL, token, auto-Enter toggle, Start/Stop buttons).
-- `onCreate()` — inflates the UI and restores saved settings from `Prefs`.
-- `savePrefs()` — writes URL / token / submit back to `SharedPreferences`.
-- `startFlow()` — enters the permission chain: mic → notifications → overlay.
-- `requestNotifIfNeeded()` — requests `POST_NOTIFICATIONS` on Android 13+ and continues to the overlay step.
-- `maybeRequestOverlay()` — sends the user to system settings if "Display over other apps" isn't granted yet.
-- `launchOverlay()` — starts `OverlayService` as a foreground service.
-- `onResume()` — if the user just returned from granting overlay permission, launch the overlay automatically.
+**`MainActivity.kt`** — settings screen.
+- `onCreate()` — inflates the UI and restores saved settings.
+- `savePrefs()` — writes all prefs to SharedPreferences.
+- `startFlow()` / `requestNotifIfNeeded()` / `maybeRequestOverlay()` — permission chain.
+- `launchOverlay()` — starts OverlayService.
 
-**`OverlayService.kt`** — the floating-bubble foreground service.
-- `onCreate()` — promotes to foreground, creates the bubble view.
-- `onStartCommand()` — handles the "Stop" action fired from the service's notification.
-- `startAsForeground()` — creates the notification channel and calls `startForeground` with `FOREGROUND_SERVICE_TYPE_MICROPHONE`.
-- `setupBubble()` — builds a `TextView`, attaches it to `WindowManager` as `TYPE_APPLICATION_OVERLAY`.
-- `attachTouchListener()` — distinguishes tap from drag by slop; tap toggles recording, drag repositions the bubble.
-- `startRecording()` — creates a `WavRecorder`, turns the bubble red, toasts "Recording…".
-- `stopAndUpload()` — stops the recorder, wraps PCM as WAV, POSTs to the server via `SttClient.sendAudio`.
-- `toast(s)` — short helper for user-visible messages.
-- `onDestroy()` — releases the recorder and removes the bubble view.
+**`OverlayService.kt`** — floating bubble + routing.
+- `setupBubble()` — builds the bubble + target-label pill in a vertical `LinearLayout` overlay.
+- `refreshTargetLabel()` — shows `→ ses3` / `→ 📋` / blank based on current mode.
+- `pollRunnable` — Handler-based poller (every 4 s) that calls `SttClient.fetchActiveSession` when auto-detect is on.
+- `attachTouchListener()` — tap/drag discrimination; tap toggles recording.
+- `startRecording()` / `stopAndUpload()` — `WavRecorder` lifecycle + HTTP upload.
+- Post-response branch: tmux mode → toast; clipboard mode → `ClipboardManager.setPrimaryClip` + optional broadcast to `SttAccessibilityService`; default → PC-paste toast.
 
-**`WavRecorder.kt`** — raw audio capture with WAV wrapping.
-- `start()` — opens `AudioRecord` (16 kHz mono PCM-16, `VOICE_RECOGNITION` source) and spawns a capture thread.
-- `stop()` — stops capture, returns the collected PCM bytes wrapped in a RIFF/WAVE header.
-- `toWav(pcm, sr)` — writes the WAV header fields around the raw PCM payload.
-- `writeIntLE()` / `writeShortLE()` — little-endian integer writers used by the header.
+**`SttAccessibilityService.kt`** — auto-paste for non-Termux apps.
+- `onServiceConnected()` — registers a package-local broadcast receiver for `ACTION_PASTE`.
+- `pasteIntoFocused(text, submit)` — finds focused editable node, performs `ACTION_SET_TEXT`, then either clicks a Send button (multilingual keyword match) or falls back to `ACTION_IME_ENTER`.
+- `findSendButton(root)` — depth-first scan of the window tree for clickable nodes whose `contentDescription`/`text` matches known Send keywords.
 
-**`SttClient.kt`** — HTTP client for the two server endpoints.
-- `normalize(base)` — prepends `http://` if the server URL lacks a scheme.
-- `send(baseUrl, token, text, submit, onResult)` — POSTs JSON to `/send`.
-- `sendAudio(baseUrl, token, wav, submit, onResult)` — POSTs raw WAV bytes to `/transcribe_and_send` with `X-Token` / `X-Submit` headers.
+**`WavRecorder.kt`** — raw PCM → WAV bytes.
+- `start()` / `stop()` — `AudioRecord` on `VOICE_RECOGNITION`, 16 kHz mono PCM-16.
+- `toWav()` — RIFF/WAVE header writer.
 
-**`Prefs.kt`** — thin `SharedPreferences` wrapper exposing `serverUrl`, `token`, and `submit` as Kotlin properties.
+**`SttClient.kt`** — HTTP.
+- `fetchActiveSession(baseUrl, token, onResult)` — GET `/active_session` for the live pill.
+- `send(...)` — JSON POST to `/send`.
+- `sendAudio(baseUrl, token, wav, submit, pasteOnPc, tmuxTarget, onResult)` — WAV POST to `/transcribe_and_send`, with headers selected from phone prefs.
 
-**`res/layout/activity_main.xml`** — settings-screen layout (URL field, token field, auto-Enter switch, Start/Stop buttons, status text).
+**`Prefs.kt`** — SharedPreferences wrapper exposing `serverUrl`, `token`, `clipboardMode`, `clipboardAutoEnter`, and `autoDetectTmux`.
 
-**`res/drawable/bubble_idle.xml`** — blue translucent circle drawn when the bubble is idle.
+**`res/layout/activity_main.xml`** — settings screen fields + switches.
 
-**`res/drawable/bubble_listening.xml`** — red translucent circle drawn while recording.
+**`res/xml/accessibility_service_config.xml`** — accessibility service capabilities (can retrieve window content, reads focus/text-changed events).
 
-**`res/values/colors.xml`**, **`strings.xml`**, **`themes.xml`** — Material 3 theme tokens, the `app_name` string, and brand colors.
+**`res/drawable/bubble_idle.xml`, `bubble_listening.xml`** — blue/red translucent circles.
+
+**`res/values/colors.xml`, `strings.xml`, `themes.xml`** — Material 3 theme + app name + accessibility service description.
 
 **`build.gradle.kts`** (root) and **`app/build.gradle.kts`** — Gradle 8.9, AGP 8.5.2, Kotlin 1.9.24, `compileSdk = 34`, `minSdk = 26`, view binding enabled.
 
@@ -223,7 +277,7 @@ Every file and function, one line each.
 
 ```
 speech-to-text-app/
-├── server.py                    # Flask + faster-whisper
+├── server.py                    # Flask + faster-whisper + tmux router
 ├── requirements.txt
 ├── start.bat                    # Windows launcher
 ├── static/
@@ -234,15 +288,21 @@ speech-to-text-app/
         ├── java/com/stt/floater/
         │   ├── MainActivity.kt
         │   ├── OverlayService.kt
+        │   ├── SttAccessibilityService.kt
         │   ├── WavRecorder.kt
         │   ├── SttClient.kt
         │   └── Prefs.kt
         └── res/
             ├── layout/activity_main.xml
+            ├── xml/accessibility_service_config.xml
             ├── drawable/bubble_idle.xml
             ├── drawable/bubble_listening.xml
             └── values/{colors,strings,themes}.xml
 ```
+
+## Related repo
+
+If you want the tmux-session side of the workflow (named `ses1`, `ses2`, ... sessions pinned to project folders, one dark-mode GUI to configure them, cross-device mirroring), see [**claude-sessions-app**](https://github.com/kevinkicho/claude-sessions-app). STT Floater's `autoDetectTmux` mode pairs naturally with that tool.
 
 ## License
 
@@ -250,7 +310,7 @@ MIT.
 
 ## Credits
 
-- [Claude Code](https://claude.com/claude-code) (Claude Opus 4.7) — wrote most of this repo.
+- [Claude Code](https://claude.com/claude-code) (Claude Opus 4.7) — wrote all of the code in this repo. I described the need, tested on real hardware (Galaxy S22 Ultra + Galaxy Tab S7 + Windows 11), and fed feedback.
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — the actual speech recognizer.
 - Whisper by OpenAI.
 - Tailscale for the transport.

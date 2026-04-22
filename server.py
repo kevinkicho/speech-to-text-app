@@ -1,9 +1,13 @@
+import hmac
+import ipaddress
+import json
 import os
 import subprocess
 import threading
 import tempfile
 import time
-from flask import Flask, request, jsonify, send_from_directory
+from pathlib import Path
+from flask import Flask, request, jsonify, send_from_directory, Response
 import pyperclip
 import pyautogui
 
@@ -21,6 +25,44 @@ WHISPER_LANGUAGE = os.environ.get('WHISPER_LANGUAGE', 'en')
 
 _whisper_model = None
 _whisper_lock = threading.Lock()
+
+# SSH key rotation: path to the current private key the phone/tablet pull.
+# rotate-ssh.ps1 generates a fresh keypair here and writes a token file.
+ROTATION_KEY_PATH = Path(r"C:\Users\kevin\Desktop\stt-app\tools\ssh_key")
+ROTATION_TOKENS_PATH = Path(r"C:\Users\kevin\Desktop\stt-app\tools\rotation-tokens.json")
+
+
+def _is_tailnet_ip(ip_str: str) -> bool:
+    """Tailscale CGNAT range is 100.64.0.0/10. Anything outside it is NOT a Tailnet
+    IP and must not be allowed near /keyfile."""
+    try:
+        return ipaddress.ip_address(ip_str) in ipaddress.ip_network('100.64.0.0/10')
+    except Exception:
+        return False
+
+
+def _load_rotation_tokens() -> list[dict]:
+    """Tokens are stored as a JSON list; we load fresh on every request so
+    rotate-ssh.ps1 can add entries without coordinating with this process."""
+    if not ROTATION_TOKENS_PATH.exists():
+        return []
+    try:
+        data = json.loads(ROTATION_TOKENS_PATH.read_text(encoding='utf-8'))
+        return [t for t in data if t.get('expires_at', 0) > time.time()]
+    except Exception as e:
+        print(f'[rotation] failed to read tokens: {e}')
+        return []
+
+
+def _token_matches(supplied: str) -> bool:
+    """Constant-time comparison across all active tokens."""
+    if not supplied:
+        return False
+    for t in _load_rotation_tokens():
+        candidate = t.get('token', '')
+        if candidate and hmac.compare_digest(candidate, supplied):
+            return True
+    return False
 
 
 def get_whisper():
@@ -118,6 +160,54 @@ def active_session():
     if request.headers.get('X-Token') != TOKEN:
         return jsonify({'error': 'bad token'}), 401
     return jsonify({'ok': True, 'session': resolve_tmux_target('auto')})
+
+
+@app.route('/sessions')
+def sessions():
+    """Return all tmux session names for the phone's tap-to-pick menu."""
+    if request.headers.get('X-Token') != TOKEN:
+        return jsonify({'error': 'bad token'}), 401
+    try:
+        out = subprocess.run(
+            ['wsl', '-d', WSL_DISTRO, '--', 'tmux', 'list-sessions',
+             '-F', '#{session_name}'],
+            capture_output=True, text=True, timeout=5,
+        )
+        names = [l.strip() for l in out.stdout.splitlines() if l.strip()] \
+                if out.returncode == 0 else []
+        return jsonify({'ok': True, 'sessions': names})
+    except Exception as e:
+        return jsonify({'ok': False, 'sessions': [], 'error': str(e)})
+
+
+@app.route('/keyfile')
+def keyfile():
+    """Serves the current SSH private key to a Tailnet device that presents
+    a valid rotation token. Gated at three layers: Tailnet IP origin, token
+    presence, and token not-expired. Every request is logged.
+
+    Tokens are populated by rotate-ssh.ps1 which writes to rotation-tokens.json
+    with a ~10 minute expiry.
+    """
+    remote = request.remote_addr or ''
+    token = request.headers.get('X-Rotation-Token', '')
+    token_short = (token[:6] + '…') if token else '(none)'
+
+    if not _is_tailnet_ip(remote):
+        print(f'[keyfile] REJECT non-Tailnet origin {remote} token={token_short}')
+        return jsonify({'error': 'forbidden'}), 403
+
+    if not _token_matches(token):
+        print(f'[keyfile] REJECT bad/expired token from {remote} token={token_short}')
+        return jsonify({'error': 'unauthorized'}), 401
+
+    if not ROTATION_KEY_PATH.exists():
+        print(f'[keyfile] no key file at {ROTATION_KEY_PATH}')
+        return jsonify({'error': 'no key staged'}), 503
+
+    print(f'[keyfile] OK serving key to {remote} token={token_short}')
+    body = ROTATION_KEY_PATH.read_bytes()
+    return Response(body, mimetype='application/x-pem-file')
 
 
 @app.route('/send', methods=['POST'])

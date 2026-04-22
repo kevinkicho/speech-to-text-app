@@ -38,6 +38,38 @@ object SttClient {
         }
     }
 
+    /** Query the server for all attached tmux session names (for the
+     *  tap-to-pick menu under the mic). Returns empty list on error. */
+    fun fetchSessions(baseUrl: String, token: String, onResult: (List<String>) -> Unit) {
+        executor.execute {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL(normalize(baseUrl) + "/sessions")
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    setRequestProperty("X-Token", token)
+                    connectTimeout = 3000
+                    readTimeout = 4000
+                }
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val arr = JSONObject(body).optJSONArray("sessions")
+                    val list = mutableListOf<String>()
+                    if (arr != null) for (i in 0 until arr.length()) list.add(arr.getString(i))
+                    onResult(list)
+                } else {
+                    onResult(emptyList())
+                }
+            } catch (e: Exception) {
+                Log.w("SttClient", "fetchSessions: ${e.message}")
+                onResult(emptyList())
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
     private fun normalize(base: String): String {
         val trimmed = base.trim().trimEnd('/')
         return if (trimmed.startsWith("http://") || trimmed.startsWith("https://"))

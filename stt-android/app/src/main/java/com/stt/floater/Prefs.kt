@@ -35,4 +35,10 @@ class Prefs(context: Context) {
     var autoDetectTmux: Boolean
         get() = sp.getBoolean("auto_detect_tmux", false)
         set(v) { sp.edit().putBoolean("auto_detect_tmux", v).apply() }
+
+    /** User's explicit tmux-session pick from the tap-to-pick menu. When
+     *  non-empty, overrides auto-detect until cleared (picking "Auto"). */
+    var explicitTmuxSession: String
+        get() = sp.getString("explicit_tmux_session", "") ?: ""
+        set(v) { sp.edit().putString("explicit_tmux_session", v).apply() }
 }

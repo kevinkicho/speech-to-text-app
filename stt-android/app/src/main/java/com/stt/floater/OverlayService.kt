@@ -33,8 +33,10 @@ class OverlayService : Service() {
     private lateinit var bubbleContainer: LinearLayout
     private lateinit var bubble: TextView
     private lateinit var targetLabel: TextView
+    private lateinit var sessionMenu: LinearLayout
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var prefs: Prefs
+    private var menuExpanded = false
 
     private var recorder: WavRecorder? = null
     @Volatile private var recording = false
@@ -125,9 +127,17 @@ class OverlayService : Service() {
             textSize = 10f
             setTextColor(Color.WHITE)
             background = pillBg
-            val padX = (6 * density).toInt()
-            val padY = (2 * density).toInt()
+            val padX = (10 * density).toInt()
+            val padY = (3 * density).toInt()
             setPadding(padX, padY, padX, padY)
+            visibility = View.GONE
+            isClickable = true
+            setOnClickListener { if (menuExpanded) collapseMenu() else expandMenu() }
+        }
+
+        sessionMenu = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
             visibility = View.GONE
         }
 
@@ -139,6 +149,12 @@ class OverlayService : Service() {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ))
             addView(targetLabel, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = (4 * density).toInt()
+            })
+            addView(sessionMenu, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             ).apply {
@@ -170,7 +186,9 @@ class OverlayService : Service() {
     }
 
     private fun refreshTargetLabel() {
+        val explicit = prefs.explicitTmuxSession.trim()
         val text = when {
+            explicit.isNotEmpty() -> explicit
             prefs.autoDetectTmux && detectedSession.isNotEmpty() -> detectedSession
             prefs.autoDetectTmux -> "(searching…)"
             prefs.clipboardMode -> "📋"
@@ -181,6 +199,83 @@ class OverlayService : Service() {
         } else {
             targetLabel.text = text
             targetLabel.visibility = View.VISIBLE
+        }
+    }
+
+    private fun expandMenu() {
+        sessionMenu.removeAllViews()
+        sessionMenu.addView(makeMenuItem("loading…", null))
+        sessionMenu.visibility = View.VISIBLE
+        menuExpanded = true
+
+        val url = prefs.serverUrl
+        if (url.isBlank()) {
+            sessionMenu.removeAllViews()
+            sessionMenu.addView(makeMenuItem("no server URL", null))
+            return
+        }
+        SttClient.fetchSessions(url, prefs.token) { sessions ->
+            bubble.post {
+                if (!menuExpanded) return@post
+                sessionMenu.removeAllViews()
+                val explicit = prefs.explicitTmuxSession.trim()
+                if (sessions.isEmpty()) {
+                    sessionMenu.addView(makeMenuItem("(no sessions)", null))
+                }
+                for (name in sessions) {
+                    val isCurrent = explicit == name ||
+                        (explicit.isEmpty() && detectedSession == name)
+                    sessionMenu.addView(makeMenuItem(
+                        if (isCurrent) "• $name" else name
+                    ) { selectSession(name) })
+                }
+                // Always show Auto option last (clears explicit pick).
+                val autoIsCurrent = explicit.isEmpty()
+                sessionMenu.addView(makeMenuItem(
+                    if (autoIsCurrent) "• Auto" else "Auto"
+                ) { selectSession("") })
+            }
+        }
+    }
+
+    private fun collapseMenu() {
+        sessionMenu.visibility = View.GONE
+        sessionMenu.removeAllViews()
+        menuExpanded = false
+    }
+
+    private fun selectSession(name: String) {
+        prefs.explicitTmuxSession = name
+        // If user picked Auto, force the pill into "searching" until the next
+        // poll arrives with a real session name.
+        if (name.isEmpty()) detectedSession = ""
+        else detectedSession = name
+        refreshTargetLabel()
+        collapseMenu()
+    }
+
+    private fun makeMenuItem(text: String, onClick: (() -> Unit)?): TextView {
+        val density = resources.displayMetrics.density
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 8f * density
+            setColor(Color.argb(220, 30, 30, 30))
+        }
+        return TextView(this).apply {
+            this.text = text
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            background = bg
+            val padX = (12 * density).toInt()
+            val padY = (5 * density).toInt()
+            setPadding(padX, padY, padX, padY)
+            (layoutParams as? LinearLayout.LayoutParams)?.apply {
+                topMargin = (2 * density).toInt()
+            }
+            if (onClick != null) {
+                isClickable = true
+                setOnClickListener { onClick() }
+            }
         }
     }
 
@@ -262,7 +357,12 @@ class OverlayService : Service() {
             toast("Set server URL in the app first")
             return
         }
-        val tmuxTarget = if (prefs.autoDetectTmux) detectedSession else ""
+        val explicit = prefs.explicitTmuxSession.trim()
+        val tmuxTarget = when {
+            explicit.isNotEmpty() -> explicit
+            prefs.autoDetectTmux -> detectedSession
+            else -> ""
+        }
         val useTmux = tmuxTarget.isNotEmpty()
         val clipboardMode = prefs.clipboardMode
         // When routing via tmux, PC paste and clipboard copy both skipped.

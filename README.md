@@ -194,6 +194,49 @@ tailscale serve --bg --https=443 http://localhost:8080
 
 Then open `https://<machine>.tail-xxxx.ts.net/` on the phone. The native app is strongly recommended over this — better quality (Whisper) and can float over other apps (PWAs cannot).
 
+## SSH key rotation
+
+The Flask server includes a key-rotation workflow so you can swap the SSH keypair that your Android devices use to connect to the PC, without touching individual files by hand. Two ways in:
+
+**Via the Claude Sessions GUI** (see [claude-sessions-app](https://github.com/kevinkicho/claude-sessions-app)) — a **🔑 Rotate SSH** button opens a panel with:
+
+- Live list of ADB-connected devices.
+- **🔑 Rotate keys (UAC)** — generates a fresh ed25519 keypair, triggers one UAC prompt to replace `administrators_authorized_keys` on Windows, issues a 10-minute rotation token, and auto-pushes the new private key to every connected device via ADB.
+- **Push current key** — re-push the existing key to newly-connected devices (no UAC, no re-rotation). Handy when you only have one USB port and need to update a second device.
+- **▶ Run rotate-key on devices** — brings Termux to the foreground on each connected Android device and types `rotate-key` via ADB input events. No typing on the device.
+- **Remote token** field with copy-to-clipboard and a live countdown — for devices not plugged in; they fetch the new key from `/keyfile` over Tailnet using the token.
+
+**Via CLI** (the scripts live locally in `tools/`, which is gitignored because it contains key material):
+
+- `rotate-ssh.bat` — double-click to run the interactive rotation script. Pushes to each connected ADB device, then prompts to plug in another and press ENTER to push again. Prints a token for remote devices.
+- `rotate-key` — on-device Termux command. Looks for a locally-pushed key at `/sdcard/Download/id_ed25519` first; falls back to fetching over Tailnet with a token. Self-updates from `/sdcard/Download/rotate-key.sh` on every run.
+
+### Bootstrapping a new device (one-time)
+
+Once per device, `adb push` `rotate-key.sh` to `/sdcard/rk.sh` (the GUI and `rotate-ssh.bat` do this for you during rotation), then in Termux:
+
+```
+bash /sdcard/rk.sh install
+```
+
+That copies the script into `~/rotate-key.sh` and registers a `rotate-key` alias in `~/.bashrc`. After that, **every future rotation** is just:
+
+```
+rotate-key
+```
+
+No tokens, no long paths, no reinstall. When the PC ships an updated `rotate-key.sh`, the script detects the newer copy in `/sdcard/Download` on the next run and overwrites itself silently.
+
+### The `/keyfile` endpoint
+
+Gated at three layers before serving the private key:
+
+1. Origin must be a Tailnet IP (CGNAT range `100.64.0.0/10`); anything else gets `403 forbidden`.
+2. `X-Rotation-Token` header must match an entry in `tools/rotation-tokens.json` that hasn't expired.
+3. Tokens are valid for 10 minutes from issuance; expired ones are filtered out on every request.
+
+Every fetch is logged to the server console with the calling IP and a truncated token prefix. The endpoint is never reachable from the public internet as long as port 8080 stays inside your Tailnet.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |

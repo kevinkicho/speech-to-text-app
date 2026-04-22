@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Whisper / HuggingFace caches (don't commit the model)
+.cache/
+models/
+
+# Local config / secrets
+local.properties
+.env
+*.local
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Android build output
+stt-android/.gradle/
+stt-android/build/
+stt-android/app/build/
+stt-android/captures/
+stt-android/.externalNativeBuild/
+stt-android/.cxx/
+
+# Gradle wrapper jar is intentionally tracked, but leave local gradle caches out
+.gradle/
+
+# Windows-specific
+*.log

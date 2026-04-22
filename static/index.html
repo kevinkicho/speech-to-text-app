@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0d12">
+<title>Speech → PC</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #0b0d12;
+    color: #e6e8ec;
+    font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    display: flex; flex-direction: column;
+    padding: 14px; gap: 12px;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  h1 {
+    font-size: 12px; opacity: .55; margin: 0;
+    text-transform: uppercase; letter-spacing: .1em;
+  }
+  #transcript {
+    flex: 1; min-height: 160px;
+    background: #151821; border: 1px solid #242836; border-radius: 14px;
+    padding: 14px; font-size: 18px;
+    white-space: pre-wrap; word-break: break-word;
+    overflow-y: auto;
+  }
+  #transcript:empty::before {
+    content: 'Tap the mic and start talking…';
+    opacity: .35;
+  }
+  .interim { opacity: .45; }
+  .toggles { display: flex; gap: 8px; font-size: 14px; }
+  label {
+    flex: 1; background: #151821; border: 1px solid #242836;
+    padding: 10px 12px; border-radius: 12px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: #6366f1; }
+  button {
+    appearance: none; border: 0; border-radius: 14px;
+    font: 600 16px system-ui; padding: 14px; color: #e6e8ec;
+    background: #242836; flex: 1;
+    touch-action: manipulation; cursor: pointer;
+  }
+  button:active { transform: scale(.985); }
+  button:disabled { opacity: .5; }
+  #mic {
+    height: 96px; font-size: 19px;
+    background: linear-gradient(135deg, #3b82f6, #6366f1);
+  }
+  #mic.listening {
+    background: linear-gradient(135deg, #ef4444, #f59e0b);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: .78; } }
+  .row { display: flex; gap: 8px; }
+  #send { background: #16a34a; }
+  #clear { background: #3b3f50; flex: 0 0 96px; }
+  #status { font-size: 12px; opacity: .6; min-height: 16px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>Speech → PC</h1>
+  <div id="transcript" aria-live="polite"></div>
+  <div class="toggles">
+    <label><input type="checkbox" id="submit" checked> Press Enter after sending</label>
+  </div>
+  <button id="mic">🎤  Tap to speak</button>
+  <div class="row">
+    <button id="clear">Clear</button>
+    <button id="send">Send to PC</button>
+  </div>
+  <div id="status"></div>
+
+<script>
+const TOKEN = (() => {
+  let t = localStorage.getItem('stt_token');
+  if (!t) {
+    t = prompt('Token (matches STT_TOKEN on PC):', 'change-me') || '';
+    localStorage.setItem('stt_token', t);
+  }
+  return t;
+})();
+
+const transcriptEl = document.getElementById('transcript');
+const micBtn = document.getElementById('mic');
+const sendBtn = document.getElementById('send');
+const clearBtn = document.getElementById('clear');
+const submitCb = document.getElementById('submit');
+const statusEl = document.getElementById('status');
+
+let finalText = '';
+let interimText = '';
+let recog = null;
+let listening = false;
+
+function setStatus(msg, ttl) {
+  statusEl.textContent = msg || '';
+  if (ttl) setTimeout(() => { if (statusEl.textContent === msg) statusEl.textContent = ''; }, ttl);
+}
+
+function render() {
+  transcriptEl.textContent = '';
+  if (finalText) transcriptEl.append(document.createTextNode(finalText));
+  if (interimText) {
+    const span = document.createElement('span');
+    span.className = 'interim';
+    span.textContent = (finalText ? ' ' : '') + interimText;
+    transcriptEl.append(span);
+  }
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function buildRecognizer() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    setStatus('Web Speech API not supported — use Chrome on Android.');
+    micBtn.disabled = true;
+    return null;
+  }
+  const r = new SR();
+  r.lang = navigator.language || 'en-US';
+  r.interimResults = true;
+  r.continuous = true;
+  r.onresult = (e) => {
+    interimText = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      const t = res[0].transcript;
+      if (res.isFinal) finalText += (finalText ? ' ' : '') + t.trim();
+      else interimText += t;
+    }
+    render();
+  };
+  r.onerror = (e) => setStatus('mic error: ' + e.error, 3000);
+  r.onend = () => {
+    if (listening) { try { r.start(); } catch {} }
+    else { micBtn.classList.remove('listening'); micBtn.textContent = '🎤  Tap to speak'; }
+  };
+  return r;
+}
+
+micBtn.addEventListener('click', () => {
+  if (!recog) recog = buildRecognizer();
+  if (!recog) return;
+  if (listening) {
+    listening = false;
+    try { recog.stop(); } catch {}
+  } else {
+    listening = true;
+    interimText = '';
+    try { recog.start(); } catch {}
+    micBtn.classList.add('listening');
+    micBtn.textContent = '● Listening — tap to stop';
+    setStatus('');
+  }
+});
+
+clearBtn.addEventListener('click', () => {
+  finalText = ''; interimText = ''; render();
+});
+
+sendBtn.addEventListener('click', async () => {
+  const text = (finalText + (interimText ? ' ' + interimText : '')).trim();
+  if (!text) { setStatus('nothing to send', 1500); return; }
+  sendBtn.disabled = true;
+  setStatus('sending…');
+  try {
+    const res = await fetch('/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, submit: submitCb.checked, token: TOKEN })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ('http ' + res.status));
+    finalText = ''; interimText = ''; render();
+    setStatus('sent ✓ (' + body.chars + ' chars)', 1500);
+  } catch (e) {
+    setStatus('failed: ' + e.message, 4000);
+  } finally {
+    sendBtn.disabled = false;
+  }
+});
+
+render();
+</script>
+</body>
+</html>

@@ -35,3 +35,6 @@ stt-android/.cxx/
 
 # Windows-specific
 *.log
+
+# Local tooling / keys — never commit
+tools/

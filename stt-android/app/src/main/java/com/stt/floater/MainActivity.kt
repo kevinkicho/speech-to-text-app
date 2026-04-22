@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -35,7 +36,14 @@ class MainActivity : AppCompatActivity() {
 
         b.urlInput.setText(prefs.serverUrl)
         b.tokenInput.setText(prefs.token)
-        b.submitSwitch.isChecked = prefs.submit
+        b.autoDetectTmuxSwitch.isChecked = prefs.autoDetectTmux
+        b.clipboardSwitch.isChecked = prefs.clipboardMode
+        b.clipboardEnterSwitch.isChecked = prefs.clipboardAutoEnter
+        b.clipboardEnterSwitch.visibility = if (prefs.clipboardMode) View.VISIBLE else View.GONE
+
+        b.clipboardSwitch.setOnCheckedChangeListener { _, checked ->
+            b.clipboardEnterSwitch.visibility = if (checked) View.VISIBLE else View.GONE
+        }
 
         b.startButton.setOnClickListener {
             savePrefs()
@@ -65,7 +73,9 @@ class MainActivity : AppCompatActivity() {
     private fun savePrefs() {
         prefs.serverUrl = b.urlInput.text.toString().trim()
         prefs.token = b.tokenInput.text.toString().trim().ifEmpty { "change-me" }
-        prefs.submit = b.submitSwitch.isChecked
+        prefs.autoDetectTmux = b.autoDetectTmuxSwitch.isChecked
+        prefs.clipboardMode = b.clipboardSwitch.isChecked
+        prefs.clipboardAutoEnter = b.clipboardEnterSwitch.isChecked
     }
 
     private fun startFlow() {

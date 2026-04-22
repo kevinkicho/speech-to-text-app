@@ -55,12 +55,27 @@
         </com.google.android.material.textfield.TextInputLayout>
 
         <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/submitSwitch"
+            android:id="@+id/autoDetectTmuxSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:checked="true"
-            android:text="Press Enter after sending" />
+            android:text="Auto-detect active tmux session" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/clipboardSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Copy to clipboard after transcribing" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/clipboardEnterSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="24dp"
+            android:layout_marginTop="4dp"
+            android:text="Then paste in &amp; press enter"
+            android:visibility="gone" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/startButton"

@@ -16,4 +16,23 @@ class Prefs(context: Context) {
     var submit: Boolean
         get() = sp.getBoolean("submit", true)
         set(v) { sp.edit().putBoolean("submit", v).apply() }
+
+    /** When true, transcribed text is copied to this device's clipboard instead
+     *  of being pasted into the PC's focused window. */
+    var clipboardMode: Boolean
+        get() = sp.getBoolean("clipboard_mode", false)
+        set(v) { sp.edit().putBoolean("clipboard_mode", v).apply() }
+
+    /** In clipboard mode: append a newline to the copied text so pasting it
+     *  into a terminal submits immediately (one tap paste = submit). */
+    var clipboardAutoEnter: Boolean
+        get() = sp.getBoolean("clipboard_auto_enter", false)
+        set(v) { sp.edit().putBoolean("clipboard_auto_enter", v).apply() }
+
+    /** When true, the overlay polls the PC periodically for the most-recently-
+     *  attached tmux session name and routes transcribed text there via
+     *  `tmux send-keys`. Takes priority over PC paste and clipboard modes. */
+    var autoDetectTmux: Boolean
+        get() = sp.getBoolean("auto_detect_tmux", false)
+        set(v) { sp.edit().putBoolean("auto_detect_tmux", v).apply() }
 }

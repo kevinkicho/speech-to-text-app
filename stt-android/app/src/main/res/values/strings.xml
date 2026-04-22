@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">STT Floater</string>
+    <string name="accessibility_label">STT Floater auto-paste</string>
+    <string name="accessibility_description">Lets STT Floater type transcribed text into the currently focused input field in other Android apps (Messages, Chrome, Notes, etc.). Required for auto-paste mode. Not used in Termux.</string>
 </resources>

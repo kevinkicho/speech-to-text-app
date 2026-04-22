@@ -1,4 +1,5 @@
 import os
+import subprocess
 import threading
 import tempfile
 import time
@@ -7,6 +8,8 @@ import pyperclip
 import pyautogui
 
 pyautogui.FAILSAFE = False
+
+WSL_DISTRO = os.environ.get('WSL_DISTRO', 'Ubuntu')
 
 app = Flask(__name__, static_folder='static', static_url_path='')
 
@@ -46,6 +49,58 @@ def paste_into_focused_window(text: str, submit: bool) -> None:
         pyautogui.press('enter')
 
 
+def resolve_tmux_target(target: str) -> str:
+    """Resolve 'auto' to the most-recently-attached tmux session name.
+    Returns the input unchanged if it's a specific name, or '' on failure."""
+    target = (target or '').strip()
+    if target.lower() != 'auto':
+        return target
+    try:
+        out = subprocess.run(
+            ['wsl', '-d', WSL_DISTRO, '--', 'tmux', 'list-sessions',
+             '-F', '#{session_last_attached} #{session_name}'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode != 0:
+            return ''
+        lines = [l for l in out.stdout.splitlines() if l.strip()]
+        if not lines:
+            return ''
+        def ts(line: str) -> int:
+            first = line.split(None, 1)[0]
+            return int(first) if first.isdigit() else 0
+        best = max(lines, key=ts)
+        parts = best.split(None, 1)
+        return parts[1].strip() if len(parts) > 1 else ''
+    except Exception as e:
+        print(f'[tmux] resolve auto failed: {e}')
+        return ''
+
+
+def tmux_send(session_name: str, text: str) -> tuple[bool, str]:
+    """Send literal text + Enter to the named tmux session. Returns (ok, msg)."""
+    if not session_name:
+        return False, 'no session'
+    try:
+        # -l makes send-keys treat the argument as literal text (no key-name
+        # interpretation), then a separate Enter keypress submits.
+        r1 = subprocess.run(
+            ['wsl', '-d', WSL_DISTRO, '--', 'tmux', 'send-keys', '-t', session_name, '-l', text],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r1.returncode != 0:
+            return False, (r1.stderr or r1.stdout or 'tmux send-keys -l failed').strip()
+        r2 = subprocess.run(
+            ['wsl', '-d', WSL_DISTRO, '--', 'tmux', 'send-keys', '-t', session_name, 'Enter'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r2.returncode != 0:
+            return False, (r2.stderr or r2.stdout or 'tmux Enter failed').strip()
+        return True, 'ok'
+    except Exception as e:
+        return False, str(e)
+
+
 @app.route('/')
 def index():
     return send_from_directory('static', 'index.html')
@@ -54,6 +109,15 @@ def index():
 @app.route('/health')
 def health():
     return jsonify({'ok': True, 'whisper_loaded': _whisper_model is not None})
+
+
+@app.route('/active_session')
+def active_session():
+    """Lets the phone overlay ask 'which tmux session would auto route to
+    right now?' for a live label under the mic. Returns '' if none attached."""
+    if request.headers.get('X-Token') != TOKEN:
+        return jsonify({'error': 'bad token'}), 401
+    return jsonify({'ok': True, 'session': resolve_tmux_target('auto')})
 
 
 @app.route('/send', methods=['POST'])
@@ -101,6 +165,22 @@ def transcribe_and_send():
             os.unlink(tmp_path)
         except Exception:
             pass
+
+    # Highest-priority target: tmux send-keys if the phone specified a session.
+    # 'auto' resolves to the most-recently-attached tmux session.
+    tmux_target_raw = request.headers.get('X-Tmux-Session', '').strip()
+    if tmux_target_raw and text:
+        resolved = resolve_tmux_target(tmux_target_raw)
+        if resolved:
+            ok, msg = tmux_send(resolved, text)
+            if ok:
+                return jsonify({'ok': True, 'text': text, 'chars': len(text),
+                                'tmux_target': resolved})
+            # If tmux failed, fall through to clipboard/paste so the utterance
+            # isn't lost — the phone will get the text in its response JSON.
+            print(f'[tmux] send failed to {resolved!r}: {msg}')
+        else:
+            print(f'[tmux] could not resolve target {tmux_target_raw!r}')
 
     if paste and text:
         paste_into_focused_window(text, submit)

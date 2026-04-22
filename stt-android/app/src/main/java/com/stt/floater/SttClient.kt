@@ -9,6 +9,35 @@ import java.util.concurrent.Executors
 object SttClient {
     private val executor = Executors.newSingleThreadExecutor()
 
+    /** Query the server for the tmux session that would be auto-routed right
+     *  now (most-recently-attached). Returns empty string if none or on error. */
+    fun fetchActiveSession(baseUrl: String, token: String, onResult: (String) -> Unit) {
+        executor.execute {
+            var conn: HttpURLConnection? = null
+            try {
+                val url = URL(normalize(baseUrl) + "/active_session")
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    setRequestProperty("X-Token", token)
+                    connectTimeout = 3000
+                    readTimeout = 4000
+                }
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    onResult(JSONObject(body).optString("session", ""))
+                } else {
+                    onResult("")
+                }
+            } catch (e: Exception) {
+                Log.w("SttClient", "fetchActiveSession: ${e.message}")
+                onResult("")
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
     private fun normalize(base: String): String {
         val trimmed = base.trim().trimEnd('/')
         return if (trimmed.startsWith("http://") || trimmed.startsWith("https://"))
@@ -58,6 +87,8 @@ object SttClient {
         token: String,
         wav: ByteArray,
         submit: Boolean,
+        pasteOnPc: Boolean,
+        tmuxTarget: String,
         onResult: (Boolean, String) -> Unit,
     ) {
         executor.execute {
@@ -69,6 +100,9 @@ object SttClient {
                     setRequestProperty("Content-Type", "audio/wav")
                     setRequestProperty("X-Token", token)
                     setRequestProperty("X-Submit", submit.toString())
+                    setRequestProperty("X-Paste", pasteOnPc.toString())
+                    if (tmuxTarget.isNotEmpty())
+                        setRequestProperty("X-Tmux-Session", tmuxTarget)
                     doOutput = true
                     connectTimeout = 5000
                     readTimeout = 120000

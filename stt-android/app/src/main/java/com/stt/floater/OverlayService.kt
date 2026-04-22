@@ -5,15 +5,24 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import kotlin.math.abs
@@ -21,12 +30,35 @@ import kotlin.math.abs
 class OverlayService : Service() {
 
     private lateinit var wm: WindowManager
+    private lateinit var bubbleContainer: LinearLayout
     private lateinit var bubble: TextView
+    private lateinit var targetLabel: TextView
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var prefs: Prefs
 
     private var recorder: WavRecorder? = null
     @Volatile private var recording = false
+
+    @Volatile private var detectedSession: String = ""
+    private val pollHandler = Handler(Looper.getMainLooper())
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            if (!prefs.autoDetectTmux) {
+                pollHandler.postDelayed(this, POLL_INTERVAL_MS)
+                return
+            }
+            val url = prefs.serverUrl
+            if (url.isNotBlank()) {
+                SttClient.fetchActiveSession(url, prefs.token) { session ->
+                    if (session != detectedSession) {
+                        detectedSession = session
+                        bubble.post { refreshTargetLabel() }
+                    }
+                }
+            }
+            pollHandler.postDelayed(this, POLL_INTERVAL_MS)
+        }
+    }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -83,6 +115,37 @@ class OverlayService : Service() {
             setPadding(pad, pad, pad, pad)
         }
 
+        val density = resources.displayMetrics.density
+        val pillBg = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 8f * density
+            setColor(Color.argb(200, 20, 20, 20))
+        }
+        targetLabel = TextView(this).apply {
+            textSize = 10f
+            setTextColor(Color.WHITE)
+            background = pillBg
+            val padX = (6 * density).toInt()
+            val padY = (2 * density).toInt()
+            setPadding(padX, padY, padX, padY)
+            visibility = View.GONE
+        }
+
+        bubbleContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(bubble, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(targetLabel, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = (4 * density).toInt()
+            })
+        }
+
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else
@@ -101,7 +164,24 @@ class OverlayService : Service() {
         }
 
         attachTouchListener()
-        wm.addView(bubble, params)
+        wm.addView(bubbleContainer, params)
+        refreshTargetLabel()
+        pollHandler.post(pollRunnable)
+    }
+
+    private fun refreshTargetLabel() {
+        val text = when {
+            prefs.autoDetectTmux && detectedSession.isNotEmpty() -> detectedSession
+            prefs.autoDetectTmux -> "(searching…)"
+            prefs.clipboardMode -> "📋"
+            else -> ""
+        }
+        if (text.isEmpty()) {
+            targetLabel.visibility = View.GONE
+        } else {
+            targetLabel.text = text
+            targetLabel.visibility = View.VISIBLE
+        }
     }
 
     private fun attachTouchListener() {
@@ -129,7 +209,7 @@ class OverlayService : Service() {
                     if (moved) {
                         params.x = startX + dx.toInt()
                         params.y = startY + dy.toInt()
-                        wm.updateViewLayout(bubble, params)
+                        wm.updateViewLayout(bubbleContainer, params)
                     }
                     true
                 }
@@ -158,6 +238,7 @@ class OverlayService : Service() {
         recorder = r
         recording = true
         bubble.setBackgroundResource(R.drawable.bubble_listening)
+        refreshTargetLabel()
         toast("Recording — tap again to stop")
     }
 
@@ -181,9 +262,53 @@ class OverlayService : Service() {
             toast("Set server URL in the app first")
             return
         }
+        val tmuxTarget = if (prefs.autoDetectTmux) detectedSession else ""
+        val useTmux = tmuxTarget.isNotEmpty()
+        val clipboardMode = prefs.clipboardMode
+        // When routing via tmux, PC paste and clipboard copy both skipped.
+        val pasteOnPc = !useTmux && !clipboardMode
+        // In PC-paste mode, always press Enter (user has no separate toggle for it
+        // — the one knob is "use clipboard vs PC"). In clipboard mode, Enter is
+        // controlled by the sub-toggle "then paste in & press enter". In tmux
+        // mode, Enter is built into the server's tmux send-keys flow.
+        val submit = if (clipboardMode) prefs.clipboardAutoEnter else true
         toast("Transcribing… (${wav.size / 1024} KB)")
-        SttClient.sendAudio(url, prefs.token, wav, prefs.submit) { ok, msg ->
-            bubble.post { toast(if (ok) "✓ $msg" else "✗ $msg") }
+        SttClient.sendAudio(url, prefs.token, wav, submit, pasteOnPc, tmuxTarget) { ok, msg ->
+            bubble.post {
+                if (ok && useTmux) {
+                    toast("$tmuxTarget: $msg")
+                } else if (ok && clipboardMode) {
+                    try {
+                        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val payload = if (prefs.clipboardAutoEnter) "$msg\n" else msg
+                        cm.setPrimaryClip(ClipData.newPlainText("stt", payload))
+
+                        // If the sub-toggle is on, also broadcast to the
+                        // AccessibilityService (if user enabled it) so non-Termux
+                        // apps get an auto-paste + Enter. Termux ignores this and
+                        // falls back to the clipboard the user manually pastes.
+                        if (prefs.clipboardAutoEnter) {
+                            try {
+                                val intent = Intent(SttAccessibilityService.ACTION_PASTE)
+                                    .setPackage(packageName)
+                                    .putExtra(SttAccessibilityService.EXTRA_TEXT, msg)
+                                    .putExtra(SttAccessibilityService.EXTRA_SUBMIT, true)
+                                sendBroadcast(intent)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "broadcast failed", e)
+                            }
+                        }
+
+                        val suffix = if (prefs.clipboardAutoEnter) " ⏎" else ""
+                        toast("📋 $msg$suffix")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "clipboard set failed", e)
+                        toast("✗ clipboard: ${e.message}")
+                    }
+                } else {
+                    toast(if (ok) "✓ $msg" else "✗ $msg")
+                }
+            }
         }
     }
 
@@ -193,8 +318,9 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         recording = false
+        pollHandler.removeCallbacks(pollRunnable)
         try { recorder?.stop() } catch (_: Exception) {}
-        try { wm.removeView(bubble) } catch (_: Exception) {}
+        try { wm.removeView(bubbleContainer) } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -203,5 +329,6 @@ class OverlayService : Service() {
         private const val CHANNEL_ID = "stt_bubble"
         private const val NOTIF_ID = 1
         private const val TAG = "OverlayService"
+        private const val POLL_INTERVAL_MS = 4_000L
     }
 }

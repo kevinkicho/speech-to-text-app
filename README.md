@@ -6,18 +6,13 @@
 > **Connectivity is Tailscale-only.** Phone and PC must be on the same Tailnet — the phone reaches the PC at its `100.x.x.x` Tailscale IP. The server refuses non-Tailnet origins as a defense-in-depth measure. No public exposure, no port forwarding.
 
 <p align="center">
-  <img src=".github/img/demo.gif" alt="STT Floater floating bubble dictating into a tmux session" width="320" />
-  <br/>
-  <em>Tap the bubble, speak, tap again — text + Enter lands in your active tmux session.</em>
+  <img src=".github/img/demo.gif" alt="STT Floater floating bubble dictating into a tmux session" width="300" />
+  &nbsp;&nbsp;
+  <img src=".github/img/main-screen.jpg" alt="STT Floater settings screen" width="300" />
 </p>
-
-<details>
-<summary><strong>Settings screen</strong> (click to expand)</summary>
-<br/>
 <p align="center">
-  <img src=".github/img/main-screen.jpg" alt="STT Floater settings screen" width="320" />
+  <em>Bubble in action — tap, speak, tap. &nbsp;|&nbsp; Settings screen with all the safety toggles and Run diagnostics.</em>
 </p>
-</details>
 
 Dictate from your Android phone into your Windows PC or directly into a live tmux session, over Tailscale. Originally built to drive [Claude Code](https://claude.com/claude-code) conversations running in PowerShell or WSL tmux without typing on the Android keyboard.
 

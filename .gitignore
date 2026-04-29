@@ -42,3 +42,7 @@ stt-android/.cxx/
 tools/*
 !tools/server-watchdog.ps1
 !tools/diagnose.ps1
+
+# Local scratchpad for source images / videos before they get processed into
+# .github/img/. The processed outputs live under .github/img/ and ARE pushed.
+screenshots/

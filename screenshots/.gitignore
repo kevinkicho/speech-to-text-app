@@ -1,6 +1,0 @@
-# Don't commit raw video files — convert to .gif first (much smaller, renders
-# inline on GitHub). The kept JPG / GIF outputs are pushed normally.
-*.mp4
-*.mov
-*.webm
-*.mkv

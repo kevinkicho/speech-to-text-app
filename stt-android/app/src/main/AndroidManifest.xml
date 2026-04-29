@@ -32,6 +32,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".InfoActivity"
+            android:exported="false"
+            android:label="About STT Floater"
+            android:parentActivityName=".MainActivity" />
+
         <service
             android:name=".OverlayService"
             android:exported="false"

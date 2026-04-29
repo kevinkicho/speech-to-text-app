@@ -36,13 +36,22 @@ class MainActivity : AppCompatActivity() {
 
         b.urlInput.setText(prefs.serverUrl)
         b.tokenInput.setText(prefs.token)
-        b.autoDetectTmuxSwitch.isChecked = prefs.autoDetectTmux
         b.clipboardSwitch.isChecked = prefs.clipboardMode
         b.clipboardEnterSwitch.isChecked = prefs.clipboardAutoEnter
         b.clipboardEnterSwitch.visibility = if (prefs.clipboardMode) View.VISIBLE else View.GONE
+        b.pcPasteFallbackSwitch.isChecked = prefs.pcPasteFallback
+        b.confirmBeforeSendSwitch.isChecked = prefs.confirmBeforeSend
 
         b.clipboardSwitch.setOnCheckedChangeListener { _, checked ->
             b.clipboardEnterSwitch.visibility = if (checked) View.VISIBLE else View.GONE
+        }
+
+        b.openAccessibilityBtn.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
+        b.infoButton.setOnClickListener {
+            startActivity(Intent(this, InfoActivity::class.java))
         }
 
         b.startButton.setOnClickListener {
@@ -66,16 +75,42 @@ class MainActivity : AppCompatActivity() {
             pendingLaunch = false
             launchOverlay()
         }
+        // Re-check accessibility status on every resume so the banner updates
+        // immediately after the user toggles the service on/off in Settings.
+        refreshAccessibilityBanner()
     }
 
     private var pendingLaunch = false
 
+    private fun refreshAccessibilityBanner() {
+        // Only show the banner when the user actually wants the auto-paste-Enter
+        // feature (clipboard mode + sub-toggle). Without it, the service is
+        // optional and we shouldn't nag.
+        val needsService = prefs.clipboardMode && prefs.clipboardAutoEnter
+        val enabled = isAccessibilityServiceEnabled()
+        b.accessibilityBanner.visibility =
+            if (needsService && !enabled) View.VISIBLE else View.GONE
+    }
+
+    /** Reads the system-level "enabled accessibility services" string and
+     *  checks if our SttAccessibilityService is in it. Survives APK reinstall
+     *  detection (Android revokes the permission on reinstall). */
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val expected = "$packageName/${SttAccessibilityService::class.java.name}"
+        val enabled = Settings.Secure.getString(
+            contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+        ) ?: return false
+        return enabled.split(":").any { it.equals(expected, ignoreCase = true) }
+    }
+
     private fun savePrefs() {
         prefs.serverUrl = b.urlInput.text.toString().trim()
         prefs.token = b.tokenInput.text.toString().trim().ifEmpty { "change-me" }
-        prefs.autoDetectTmux = b.autoDetectTmuxSwitch.isChecked
         prefs.clipboardMode = b.clipboardSwitch.isChecked
         prefs.clipboardAutoEnter = b.clipboardEnterSwitch.isChecked
+        prefs.pcPasteFallback = b.pcPasteFallbackSwitch.isChecked
+        prefs.confirmBeforeSend = b.confirmBeforeSendSwitch.isChecked
     }
 
     private fun startFlow() {

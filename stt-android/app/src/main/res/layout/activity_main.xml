@@ -10,12 +10,36 @@
         android:orientation="vertical"
         android:padding="20dp">
 
-        <TextView
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="STT Floater"
-            android:textSize="22sp"
-            android:textStyle="bold" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="STT Floater"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/infoButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="?"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:gravity="center"
+                android:minWidth="40dp"
+                android:minHeight="40dp"
+                android:padding="6dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="About this app" />
+        </LinearLayout>
 
         <TextView
             android:layout_width="match_parent"
@@ -55,13 +79,6 @@
         </com.google.android.material.textfield.TextInputLayout>
 
         <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/autoDetectTmuxSwitch"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="Auto-detect active tmux session" />
-
-        <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/clipboardSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -76,6 +93,70 @@
             android:layout_marginTop="4dp"
             android:text="Then paste in &amp; press enter"
             android:visibility="gone" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/pcPasteFallbackSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Allow PC paste fallback if tmux fails" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginTop="2dp"
+            android:alpha="0.55"
+            android:textSize="12sp"
+            android:text="Off by default. When on, a missed tmux session causes text to be typed into whatever Windows window is focused. Risky if your focus is Slack / browser." />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/confirmBeforeSendSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Confirm before sending" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_marginTop="2dp"
+            android:alpha="0.55"
+            android:textSize="12sp"
+            android:text="When on, the bubble shows the transcribed text and a ✓ button. Adds one tap per utterance — useful if your tmux target is a shell." />
+
+        <LinearLayout
+            android:id="@+id/accessibilityBanner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="16dp"
+            android:padding="12dp"
+            android:background="#33FFA000"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textStyle="bold"
+                android:text="Accessibility Service is OFF" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textSize="13sp"
+                android:text="Auto-paste-and-Enter in clipboard mode needs Accessibility access. Tap below to enable." />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/openAccessibilityBtn"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Open Accessibility Settings" />
+        </LinearLayout>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/startButton"

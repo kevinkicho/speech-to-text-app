@@ -3,4 +3,5 @@
     <color name="brand">#6366F1</color>
     <color name="bubble_idle">#CC3B82F6</color>
     <color name="bubble_listening">#DDEF4444</color>
+    <color name="bubble_transcribing">#DDF59E0B</color>
 </resources>

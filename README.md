@@ -1,5 +1,10 @@
 # STT Floater
 
+> **Designed to pair with [claude-sessions-app](https://github.com/kevinkicho/claude-sessions-app).**
+> STT Floater routes transcribed speech into named tmux sessions (`ses1`, `ses2`, `ses3`, …) on your PC. Those sessions are managed by **claude-sessions-app**, which you should install first. Without it (or some equivalent tmux setup), there's nowhere for the transcribed text to land except a generic Windows paste.
+>
+> **Connectivity is Tailscale-only.** Phone and PC must be on the same Tailnet — the phone reaches the PC at its `100.x.x.x` Tailscale IP. The server refuses non-Tailnet origins as a defense-in-depth measure. No public exposure, no port forwarding.
+
 Dictate from your Android phone into your Windows PC or directly into a live tmux session, over Tailscale. Originally built to drive [Claude Code](https://claude.com/claude-code) conversations running in PowerShell or WSL tmux without typing on the Android keyboard.
 
 Tap a floating bubble on your phone, speak, tap again. Audio is uploaded over your Tailnet, transcribed by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on your PC, and delivered to one of three places depending on your settings:
@@ -149,6 +154,19 @@ The service only activates when **"Copy to clipboard after transcribing"** and *
 - **Want text in a specific tmux session (ses1, ses2, ses3, ...)?** Enable auto-detect. Make sure you've SSH'd into that session at least once recently so tmux marks it "last attached." Pill should show it. Tap, speak, tap.
 - **Want text in Messages / Chrome / Notes?** Enable clipboard + "Then paste in & press enter", enable Accessibility service once. Tap compose field, tap bubble, speak, tap. Text + Send is automatic.
 - **Want text in Termux outside of tmux-send-keys mode?** Enable clipboard + "Then paste in & press enter". Tap bubble, speak, tap. Long-press in Termux → Paste. The trailing `\n` submits.
+
+### Auto vs. explicit pick (the multi-client tmux gotcha)
+
+The pill under the mic has two modes: `Auto` (default) and a specific session you pick from the tap-to-pick menu (e.g. `• ses2`).
+
+`Auto` resolves to **the most-recently-attached tmux session**, where "attached" means *any client* on *any device* ran `tmux attach -t sesN`. tmux tracks one global timestamp per session — not per user, not per device.
+
+This bites in two real-life cases:
+
+- **Two devices SSH'd in at once.** You attach `ses1` from the phone for log-tailing, then attach `ses2` from PowerShell on the laptop a few seconds later. `Auto` now picks `ses2` because the laptop attached it most recently, even though you're looking at `ses1` on the phone. Speak → text lands in `ses2`. Surprise.
+- **Switching panes ≠ re-attaching.** Inside tmux, switching with `Ctrl-B s` or `Ctrl-B (` does not bump `session_last_attached`. So if you attached `ses1` an hour ago and have been navigating around inside it the whole time, `Auto` may still report `ses1` as last-attached even after a brief detour through `ses3`. Usually fine, occasionally counter-intuitive.
+
+**The fix is the explicit pick.** Tap the pill → pick `ses2` from the menu → it stays locked to `ses2` until you change it (or pick `Auto` again). Every utterance routes there regardless of which session is "current" anywhere else.
 
 ## Configuration
 

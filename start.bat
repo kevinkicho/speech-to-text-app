@@ -29,7 +29,7 @@ if "%STT_PORT%"=="" set STT_PORT=8080
 echo.
 echo =========================================================
 echo  STT server running on port %STT_PORT%
-echo  Token: %STT_TOKEN%   (change by setting STT_TOKEN env var)
+echo  Token: (set; not echoed — see server log for redacted form)
 echo.
 echo  Next step: expose it over HTTPS via Tailscale, e.g.
 echo    tailscale serve --bg --https=443 http://localhost:%STT_PORT%

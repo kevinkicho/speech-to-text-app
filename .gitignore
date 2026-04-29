@@ -36,5 +36,8 @@ stt-android/.cxx/
 # Windows-specific
 *.log
 
-# Local tooling / keys — never commit
-tools/
+# Local tooling / keys — never commit (everything in tools/ is local).
+# Negation requires ignoring contents (tools/*), not the dir itself, so git
+# still descends into the dir and matches the !exception below.
+tools/*
+!tools/server-watchdog.ps1

@@ -41,3 +41,4 @@ stt-android/.cxx/
 # still descends into the dir and matches the !exception below.
 tools/*
 !tools/server-watchdog.ps1
+!tools/diagnose.ps1

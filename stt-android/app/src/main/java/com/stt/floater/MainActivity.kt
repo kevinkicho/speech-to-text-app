@@ -54,6 +54,13 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, InfoActivity::class.java))
         }
 
+        b.diagnosticsButton.setOnClickListener {
+            // Save prefs first so the diagnostics see whatever's currently in
+            // the form fields, not whatever was saved last time.
+            savePrefs()
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
+        }
+
         b.startButton.setOnClickListener {
             savePrefs()
             if (prefs.serverUrl.isBlank()) {

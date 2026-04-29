@@ -278,6 +278,83 @@ def active_session():
     return jsonify({'ok': True, 'session': resolve_tmux_target('auto')})
 
 
+def _run_server_checks() -> list[dict]:
+    """Server-side health checks consumed by /diagnose. Returns a list of
+    {name, status, detail} dicts. Status is OK / WARN / FAIL."""
+    out: list[dict] = []
+
+    # Whisper readiness.
+    if _whisper_model is not None:
+        out.append({'name': 'whisper model loaded', 'status': 'OK', 'detail': WHISPER_MODEL})
+    else:
+        out.append({'name': 'whisper model loaded', 'status': 'WARN',
+                    'detail': 'still warming up — first request will be slow'})
+
+    # WSL distro present.
+    try:
+        r = subprocess.run(['wsl', '-l', '-q'], capture_output=True, timeout=5)
+        # `wsl -l -q` outputs UTF-16-LE on Windows.
+        text = r.stdout.decode('utf-16-le', errors='replace').replace('\x00', '')
+        names = [l.strip() for l in text.splitlines() if l.strip()]
+        if WSL_DISTRO in names:
+            out.append({'name': f'wsl distro {WSL_DISTRO}', 'status': 'OK', 'detail': 'available'})
+        else:
+            out.append({'name': f'wsl distro {WSL_DISTRO}', 'status': 'FAIL',
+                        'detail': f'not in: {", ".join(names) or "(none)"}'})
+    except Exception as e:
+        out.append({'name': 'wsl distro', 'status': 'FAIL', 'detail': str(e)})
+
+    # tmux sessions.
+    try:
+        r = subprocess.run(
+            ['wsl', '-d', WSL_DISTRO, '--', 'bash', '-lc',
+             "tmux list-sessions -F '#{session_name}'"],
+            capture_output=True, text=True, timeout=WSL_TIMEOUT,
+        )
+        if r.returncode == 0:
+            sessions = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+            if sessions:
+                out.append({'name': 'tmux sessions', 'status': 'OK',
+                            'detail': f'{len(sessions)}: {", ".join(sessions)}'})
+            else:
+                out.append({'name': 'tmux sessions', 'status': 'WARN',
+                            'detail': 'none — start sessions via claude-sessions-app'})
+        else:
+            out.append({'name': 'tmux sessions', 'status': 'FAIL',
+                        'detail': (r.stderr or 'tmux returned non-zero').strip()})
+    except Exception as e:
+        out.append({'name': 'tmux sessions', 'status': 'FAIL', 'detail': str(e)})
+
+    # auto-resolve picks something.
+    try:
+        auto = resolve_tmux_target('auto')
+        if auto:
+            out.append({'name': 'tmux auto-resolve', 'status': 'OK', 'detail': f'-> {auto}'})
+        else:
+            out.append({'name': 'tmux auto-resolve', 'status': 'WARN',
+                        'detail': 'no most-recently-attached session'})
+    except Exception as e:
+        out.append({'name': 'tmux auto-resolve', 'status': 'FAIL', 'detail': str(e)})
+
+    # Token sanity.
+    if TOKEN == 'change-me':
+        out.append({'name': 'token customized', 'status': 'WARN',
+                    'detail': 'using default — fine for personal Tailnet, weak otherwise'})
+    else:
+        out.append({'name': 'token customized', 'status': 'OK', 'detail': 'non-default'})
+
+    return out
+
+
+@app.route('/diagnose')
+def diagnose():
+    """JSON health report consumed by both the phone in-app diagnostics and
+    the local diagnose.ps1. Tailnet-gated like every other sensitive endpoint."""
+    if (resp := _gate_origin()): return resp
+    if (resp := _gate_token()): return resp
+    return jsonify({'ok': True, 'checks': _run_server_checks()})
+
+
 @app.route('/sessions')
 def sessions():
     """All tmux session names for the phone's tap-to-pick menu."""

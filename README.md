@@ -9,11 +9,11 @@ Dictate from your Android phone into your Windows PC or directly into a live tmu
 
 Tap a floating bubble on your phone, speak, tap again. Audio is uploaded over your Tailnet, transcribed by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on your PC, and delivered to one of three places depending on your settings:
 
-1. **PC** — pasted into whichever Windows window is focused (original mode).
+1. **tmux session** (recommended) — typed directly into a named tmux session running on your PC via `tmux send-keys`, no window focus required.
 2. **Phone clipboard** — copied to Android's clipboard for you to paste anywhere on the phone.
-3. **tmux session** — typed directly into a named tmux session running on your PC via `tmux send-keys`, no window focus required.
+3. **PC focused window** (opt-in fallback) — pasted into whichever Windows window has focus. Off by default to avoid dictation landing in Slack / a browser tab if tmux misses.
 
-The floating bubble shows a live pill under the mic indicating where your text will go (`→ ses3`, `→ 📋`, or nothing for PC mode).
+The floating bubble shows a live pill under the mic indicating where your text will go: `ses3` (auto-detected), `• ses2` (you picked it from the menu), `📋` (clipboard mode), or `(searching…)` if no tmux session is attached. The pill turns red with `⚠` if the last send to your picked target didn't actually land there.
 
 ## The problem this solves
 
@@ -28,8 +28,10 @@ All of the code in this repo was written by **[Claude Code](https://claude.com/c
 Notable design pivots, all driven by real-device testing:
 
 - First approach used Android's `SpeechRecognizer` directly. On a Galaxy S22, Bixby starved the mic and all three recognizer paths failed — pivoted to recording raw audio with `AudioRecord` and transcribing server-side with Whisper.
-- First output path only pasted into the focused Windows window via `pyautogui`. Added clipboard mode and then tmux-send-keys mode as use cases expanded beyond RealVNC.
+- First output path only pasted into the focused Windows window via `pyautogui`. Added clipboard mode, then tmux-send-keys mode, and finally made tmux the default routing path (with PC paste as opt-in fallback) once it became clear that "type into a random Windows window" is the most embarrassment-prone failure mode in the system.
 - For other Android apps (not Termux), added an Accessibility Service that finds the focused editable field, sets text, and clicks the app's Send button (multilingual keyword match: en/ko/ja/zh/es/fr/de/it/ru).
+- Polling for "which tmux session is active right now?" used to fire every 4 seconds while the bubble was up — meaningful battery drain for a label that updates infrequently. Replaced with on-demand fetch (when the bubble service starts, when you tap the mic, when you pick "Auto" from the menu).
+- Original WSL `tmux list-sessions -F '#{session_name}'` call was silently broken on Windows for two commits — `wsl.exe`'s arg parser strips the `#{…}` format string. Wrapped in `bash -lc '…'` so the format survives the boundary.
 
 Treat this as working but lightly reviewed code. PRs welcome.
 
@@ -38,8 +40,9 @@ Treat this as working but lightly reviewed code. PRs welcome.
 ```
 [Android phone]                              [Windows PC]
   tap bubble → record WAV
-                                ↓ over Tailscale HTTP
-                                        Flask server (:8080)
+                                ↓ over Tailscale (WireGuard)
+                                  HTTP to PC's 100.x.x.x:8080
+                                        Flask server
                                               │
                                               ▼
                                          faster-whisper
@@ -47,21 +50,27 @@ Treat this as working but lightly reviewed code. PRs welcome.
                                               ▼
                           ┌───────────────────┼────────────────────┐
                           ▼                   ▼                    ▼
-                   pyautogui paste    clipboard+\n back       tmux send-keys
-                   (PC focused win)   to phone clipboard      -t <session>
+                   tmux send-keys      clipboard back        pyautogui paste
+                   -t <session>        to phone (with        (PC focused win)
+                   (default path)      optional \n)          (OPT-IN fallback)
 ```
 
-Routing is decided per-utterance by request headers:
+Routing precedence per utterance, decided by phone-side prefs and HTTP headers:
 
-- `X-Tmux-Session: ses3` or `auto` → tmux send-keys. Highest priority; skips everything else.
-- `X-Paste: false` → skip PC paste. The phone app enables this in clipboard mode and writes the returned text locally.
-- Default → PC paste into focused window, optionally followed by Enter.
+1. **Explicit pick** — if you picked a session from the tap-to-pick menu, the phone sends `X-Tmux-Session: ses2`. Server runs `tmux send-keys -t ses2`. Wins over everything else.
+2. **Clipboard mode** — if the toggle is on, the phone omits `X-Tmux-Session` entirely and writes the returned text to its own clipboard.
+3. **Auto** — otherwise the phone sends `X-Tmux-Session: auto`. Server resolves to the most-recently-attached tmux session. Falls through to step 4 if no tmux session is attached.
+4. **PC paste fallback** — only fires if `X-Paste: true`, which the phone only sends when the user has explicitly enabled the "Allow PC paste fallback" toggle. Off by default — the failure mode of typing dictation into an arbitrary Windows window is too embarrassment-prone to leave on by default.
 
 ## Routing modes
 
-### 1. PC paste mode (default)
+### 1. Tmux send-keys mode (default, recommended)
 
-Transcript is typed into whichever Windows window has focus. Good if you're working on PC, bad if you're away from the PC and don't want to juggle focus. Press Enter after paste is on by default.
+Transcript is written **directly into a named tmux session** via `wsl -d Ubuntu -- bash -lc "tmux send-keys -t <session> -l <text>"` then a separate `Enter` keypress. Because the tmux session is shared across every attached device (phone Termux, tablet Termux, PC Windows Terminal), the text appears simultaneously on all of them. Doesn't care what PC window is focused, doesn't need accessibility, doesn't need manual paste.
+
+**Auto vs explicit pick:** the pill under the mic shows `ses1` (auto — most-recently-attached, refreshed when you tap the mic or pick "Auto" from the menu), or `• ses2` (you tapped the pill and picked ses2 from the list — locked there until you change it). Explicit pick is the right answer for multi-device workflows where "most-recently-attached" can flip around.
+
+The pill turns red with a `⚠` prefix if the last send to your picked target didn't actually land there (session was deleted, tmux died, etc.). Cleared on the next successful send to that target.
 
 ### 2. Phone clipboard mode
 
@@ -70,11 +79,21 @@ Transcript comes back to the phone and goes into Android's clipboard. You long-p
 - Clipboard has a trailing `\n` so paste in Termux submits in one action.
 - An **Accessibility Service** (if you've enabled it once in Android Settings) finds the focused input field in non-Termux apps, performs Set-Text, and clicks the app's Send button — fully hands-free. Works in Messages, Chrome, Notes, KakaoTalk, etc. Termux's custom TerminalView ignores the accessibility paste, so it falls back to the clipboard flow.
 
-### 3. Tmux send-keys mode (recommended for Claude Code workflows)
+If the Accessibility Service is disabled (Android revokes it on every APK reinstall), the main app screen surfaces an amber banner with a one-tap "Open Accessibility Settings" button.
 
-Transcript is written **directly into a named tmux session** via `wsl -d Ubuntu -- tmux send-keys -t <session> "<text>" Enter`. Because the tmux session is shared across every attached device (phone Termux, tablet Termux, PC Windows Terminal), the text appears simultaneously on all of them. Doesn't care what PC window is focused, doesn't need accessibility, doesn't need manual paste.
+### 3. PC paste fallback (opt-in)
 
-**Auto-detect:** when **"Auto-detect active tmux session"** is on in the phone app, the overlay polls the PC every 4 seconds for the most-recently-attached session (`tmux list-sessions -F '#{session_last_attached} #{session_name}'`) and shows it live in the pill under the mic. SSH into a different session on the phone and within ~4 s the pill updates to match. One less thing to configure.
+Toggle: **"Allow PC paste fallback if tmux fails"** in the main app screen. Off by default. When on and a tmux send fails (or you have no explicit pick + no tmux session attached), the server pastes the text into whatever Windows window has focus and presses Enter.
+
+## Floating bubble UI
+
+- **Tap the bubble** to start/stop recording. Idle = blue, listening = red, transcribing = amber spinner that rotates until the response arrives.
+- **Tap the pill** under the bubble to open the tap-to-pick menu of tmux sessions. Pick a session name to lock to it, or pick "Auto" to follow most-recently-attached. The menu refreshes from the server every time it opens.
+- **Drag the bubble** to reposition it.
+
+Optional **"Confirm before sending"** toggle (off by default): after transcription, the bubble shows a blue preview pill with the recognized text plus ✓/✗ buttons. Nothing routes until you tap ✓; tapping ✗, tapping the bubble itself, or waiting 15 s drops the utterance. Worth turning on if your tmux target is a shell where mishears are dangerous.
+
+If a send fails entirely (server unreachable, timeout, server 5xx), the WAV is **persisted to a small on-disk queue** (max 10 entries) and replayed opportunistically on the next mic interaction. So a transient cellular blip doesn't lose the sentence.
 
 ## Why not Android's SpeechRecognizer?
 
@@ -108,6 +127,8 @@ python server.py
 
 First launch downloads the Whisper `base.en` model (~150 MB) and preloads it. The server binds to all interfaces on port 8080 so Tailscale can reach it. `start.bat` is a one-click launcher that handles venv creation + dep install.
 
+For a "set and forget" deployment, point a shortcut in `shell:startup` at `tools/server-watchdog.ps1`. The watchdog launches the server hidden, restarts it if it crashes (with exponential backoff and a single-instance lock), and writes a rolling log file at `tools/logs/server.log` (10 MB max, keeps 5 rotated).
+
 Find your PC's Tailscale IP:
 
 ```
@@ -140,20 +161,35 @@ To have transcripts auto-typed + sent in apps like Messages, Chrome, KakaoTalk:
 
 The service only activates when **"Copy to clipboard after transcribing"** and **"Then paste in & press enter"** are both on in the app. It finds the focused editable field, calls `ACTION_SET_TEXT`, then scans the window for a Send button (matches `send` / `보내기` / `送信` / and other language keywords) and clicks it.
 
-### 5. (Optional) Enable tmux-send-keys mode
+### 5. Tmux send-keys mode (this is the default)
 
-1. In the phone app, flip **"Auto-detect active tmux session"** → On.
-2. Stop and Start the bubble so it picks up the new pref.
-3. The pill under the mic shows `→ (searching…)` then updates to `→ ses3` (or whatever session is most-recently attached).
-4. SSH into a different tmux session from phone Termux → within ~4 s the pill updates.
+1. Make sure you have at least one tmux session running on the PC (e.g. via [claude-sessions-app](https://github.com/kevinkicho/claude-sessions-app)).
+2. Start the bubble.
+3. The pill under the mic shows `(searching…)` until the first fetch returns, then `ses3` (or whatever the most-recently-attached session is).
+4. Optional: tap the pill → tap a specific session name to lock to it (`• ses2`).
 5. Tap the mic, speak, tap again — text + Enter lands in that tmux session, visible on every attached device.
+
+## Self-diagnose tool
+
+Two surfaces, same idea: walk every link in the chain (server, watchdog, WSL, tmux, Tailscale, firewall, phone permissions, network reachability, token match) and print a colored PASS/WARN/FAIL report.
+
+**On the PC**:
+
+```powershell
+.\tools\diagnose.ps1
+```
+
+Exits 0 if everything's healthy, non-zero if anything is in FAIL. If a phone is connected via adb, it also probes the phone's prefs (URL + token match) and bubble service status.
+
+**On the phone**: open the app → tap **Run diagnostics** at the bottom of the main screen. The phone runs its own checks (RECORD_AUDIO / overlay / accessibility perms, bubble service running, WAV queue size, network reachability, token accepted) and combines them with the server's `/diagnose` response into one scrolling, selectable report.
 
 ## Usage cheatsheet
 
-- **Want text in a Windows app (Word, browser, etc.)?** Disable auto-detect and clipboard. Click the target window on PC. Tap bubble, speak, tap.
-- **Want text in a specific tmux session (ses1, ses2, ses3, ...)?** Enable auto-detect. Make sure you've SSH'd into that session at least once recently so tmux marks it "last attached." Pill should show it. Tap, speak, tap.
-- **Want text in Messages / Chrome / Notes?** Enable clipboard + "Then paste in & press enter", enable Accessibility service once. Tap compose field, tap bubble, speak, tap. Text + Send is automatic.
+- **Want text in a specific tmux session (ses1, ses2, ses3, ...)?** Tap the pill → pick the session name. Locked there until you change it. Tap, speak, tap.
+- **Want text in whatever tmux session you're using right now?** Leave the pill on Auto (default). Speak. Server picks the most-recently-attached.
+- **Want text in Messages / Chrome / Notes?** Enable clipboard + "Then paste in & press enter", enable the Accessibility service once. Tap compose field, tap bubble, speak, tap. Text + Send is automatic.
 - **Want text in Termux outside of tmux-send-keys mode?** Enable clipboard + "Then paste in & press enter". Tap bubble, speak, tap. Long-press in Termux → Paste. The trailing `\n` submits.
+- **Want text in a Windows app (Word, browser, etc.)?** Enable "Allow PC paste fallback", make sure no tmux target is set (clipboard mode off, no explicit pick, no auto session attached). Click the target window. Tap, speak, tap.
 
 ### Auto vs. explicit pick (the multi-client tmux gotcha)
 
@@ -174,9 +210,14 @@ Environment variables on the PC server:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `STT_TOKEN` | `change-me` | Shared secret — must match the Android app |
+| `STT_TOKEN` | `change-me` | Shared secret — must match the Android app. Set it via Windows user env var; never commit it. |
 | `STT_PORT` | `8080` | Listen port |
 | `WSL_DISTRO` | `Ubuntu` | WSL distro for tmux send-keys |
+| `STT_WSL_TIMEOUT` | `15` | Seconds. Tmux subprocess timeout — bumped from 5 because WSL cold-start after laptop resume can take 8-15s |
+| `STT_PROJECT_ROOT` | `<repo dir>` | Override the auto-derived project root (rarely needed) |
+| `STT_TOOLS_DIR` | `<root>/tools` | Where rotation keys + watchdog logs live |
+| `STT_ROTATION_KEY` | `<tools>/ssh_key` | Path to the rotated private key served by `/keyfile` |
+| `STT_ROTATION_TOKENS` | `<tools>/rotation-tokens.json` | Path to the rotation-token JSON file |
 | `WHISPER_MODEL` | `base.en` | Try `small.en` for better quality, `tiny.en` for speed. Drop `.en` for multilingual |
 | `WHISPER_DEVICE` | `cpu` | Set to `cuda` for an NVIDIA GPU |
 | `WHISPER_COMPUTE` | `int8` | Use `float16` with CUDA |
@@ -184,23 +225,46 @@ Environment variables on the PC server:
 
 ## API
 
+All sensitive endpoints are gated by both the Tailnet origin check (source IP must be in `100.64.0.0/10` or loopback) and the `X-Token` header. `/keyfile` is even stricter — Tailnet only, no loopback. `/health` is intentionally open as a liveness probe.
+
 - `GET /health` — returns `{ok, whisper_loaded}`.
-- `GET /active_session` (header `X-Token`) — returns `{ok, session}` with the most-recently-attached tmux session name, or empty string if none.
-- `POST /send` — JSON `{text, submit, token}`. Pastes text directly (used by the PWA).
+- `GET /active_session` — returns `{ok, session}` with the most-recently-attached tmux session name, or empty string if none.
+- `GET /sessions` — returns `{ok, sessions: [...]}` with all named tmux sessions (used by the phone's tap-to-pick menu).
+- `GET /diagnose` — returns `{ok, checks: [{name, status, detail}, ...]}`. Server-side health checks consumed by the in-app and PowerShell diagnose tools.
+- `GET /keyfile` (header `X-Rotation-Token`) — serves the rotated SSH private key. Tailnet-only. See [SSH key rotation](#ssh-key-rotation).
+- `POST /send` — JSON `{token, text, tmux_target?, paste?, submit?}`. Routes already-transcribed text. Used by the phone's confirm-tap flow (transcribe-only first, deliver second).
 - `POST /transcribe_and_send` — raw `audio/wav` body. Headers:
   - `X-Token`: auth
-  - `X-Submit`: `true` / `false` — press Enter after paste (PC mode only)
-  - `X-Paste`: `true` / `false` — set to `false` to skip the PC paste (clipboard mode uses this)
-  - `X-Tmux-Session`: `auto`, specific name, or omitted. If set, routes via `tmux send-keys` and skips PC paste.
+  - `X-Submit`: `true` / `false` — press Enter after paste (PC paste path only)
+  - `X-Paste`: `true` / `false` — set to `true` to allow PC paste fallback. **Defaults to `false`** so a tmux miss never silently types into a random Windows window.
+  - `X-Tmux-Session`: `auto`, specific name, or omitted. If set, routes via `tmux send-keys` first.
+  - `X-Transcribe-Only`: `true` to skip routing entirely (returns just the text). Used by the confirm flow.
 
-Response always includes `{ok, text, chars, tmux_target?}` so the phone can display or clipboard-copy the transcript.
+Response includes `{ok, text, chars, tmux_target?, delivered?, tmux_failed?}` — `tmux_target` is set only if send-keys actually landed; `delivered` indicates whether PC paste fired; `tmux_failed` carries an error string for debugging when relevant.
 
 ## Security
 
-- The token is a low bar. Anything on your Tailnet can reach the server; for a personal Tailnet that is fine.
-- Do not expose port 8080 to the public internet.
-- Windows Firewall will prompt on first run — allow on **Private** networks.
-- Accessibility Service has broad permissions on Android. Only enable the STT Floater service; disable it if you uninstall the app.
+This section reflects the actual posture of the deployed code.
+
+**Network gating:**
+- All sensitive endpoints (`/active_session`, `/sessions`, `/diagnose`, `/transcribe_and_send`, `/send`) refuse any request whose source IP isn't in the Tailnet (`100.64.0.0/10`) or loopback (`127.0.0.0/8`, `::1`). Defense-in-depth so an accidental localhost-bypass tunnel can't expose the audio capture / tmux send-keys paths.
+- `/keyfile` excludes loopback — Tailnet-only.
+- Server binds to `0.0.0.0:8080` so Tailscale can reach it. Windows Firewall is the only thing keeping random LAN devices off; allow on **Private** when prompted, never on Public.
+
+**Token:**
+- `STT_TOKEN` is a shared secret between phone and PC. Set it via Windows user env var; do not commit. Default `change-me` is fine for a single-user Tailnet but won't survive someone else getting onto your Tailnet.
+- Token is redacted in all log output (first 4 chars + ellipsis only).
+- `start.bat` no longer echoes the token to stdout.
+
+**Concurrency:**
+- A single global `_deliver_lock` serializes pyautogui paste and tmux send-keys so two phones speaking at once can't interleave keystrokes.
+
+**Audit trail:**
+- `tools/logs/server.log` rolls at 10 MB, keeps 5 rotated. Log lines include source IP for every accepted/rejected request.
+
+**Don't expose 8080 to the public internet.** Concretely: don't add a router port-forward to it, don't run `tailscale funnel` on it, don't `ngrok http 8080` it, don't `cloudflared tunnel --url http://localhost:8080` it. Tailscale ACLs are the load-bearing protection. Run `tools/diagnose.ps1` to verify nothing is exposing it.
+
+**Accessibility Service** has broad permissions on Android. Only enable the STT Floater service; disable it if you uninstall the app. Android revokes the permission on every APK reinstall, so the main screen surfaces a banner reminding you to re-enable.
 
 ## Alternate client: browser PWA
 
@@ -257,16 +321,23 @@ Every fetch is logged to the server console with the calling IP and a truncated 
 
 ## Troubleshooting
 
+First step for any "something's broken" report: run the diagnose tool. PC side: `.\tools\diagnose.ps1`. Phone side: tap **Run diagnostics** in the main app screen. Both narrow the failure to a specific layer.
+
 | Symptom | Likely cause |
 |---|---|
 | Toast `no protocol` | Missing `http://` in URL. The app auto-prepends it now; re-save settings. |
-| Toast `http 401` | Token mismatch between app and server. |
-| `Transcribing…` then timeout | Windows Firewall blocking port 8080. Allow on **Private networks**. |
+| Toast `http 401` | Token mismatch between app and server. Diagnose tool flags this directly. |
+| Toast `http 403` | Phone request reached server but failed the Tailnet origin gate. Check Tailscale is connected on the phone. |
+| `Transcribing…` then `✗ queued (1)` | Server unreachable. Audio is in the on-disk retry queue and will replay on next mic tap once connectivity returns. |
 | Transcription is empty | Tapped twice too fast. Record at least one second of clear speech. |
-| PC paste mode → wrong window got the text | Click the target window *before* tapping the bubble. |
-| Pill shows `→ (searching…)` forever | No tmux session is currently attached on the PC. Run `tmux attach -t ses3` (or `ses3` if using Claude Sessions) on the PC or phone first. |
+| Pill turns red `⚠ ses2` | The session you picked no longer exists (or tmux died). Tap pill → pick a different session, or restart tmux. |
+| Pill shows `(searching…)` forever | No tmux session is currently attached on the PC. Start one (e.g. via claude-sessions-app), or pick a specific session from the menu. |
+| Confirm preview doesn't appear | The "Confirm before sending" toggle requires the new in-app preview UI; rebuild + reinstall if you're on an older APK. |
+| Bubble doesn't survive phone reboot | Foreground services don't auto-launch on Android. Open the app and tap **Start floating bubble** after each reboot. |
+| Server died in the night | Check `tools/logs/server.log`. The watchdog should have restarted it; if "fast-crash streak" is climbing, something's actually wrong (whisper failure, port conflict, etc.). |
 | Auto-paste works in Messages but not KakaoTalk | Add more Send button keywords to `SttAccessibilityService.findSendButton()`. Default covers en/ko/ja/zh/es/fr/de/it/ru. |
 | Enter doesn't fire in some app | That app uses Enter for newline (chat apps often do). The Accessibility Service tries a Send button match first; if no match it falls back to `ACTION_IME_ENTER`. If neither works, dump the accessibility tree (`adb shell uiautomator dump`) and add the app's Send-button description to the keyword list. |
+| Accessibility banner won't go away even after enabling | Toggle `clipboard_auto_enter` off and back on, or restart the app — the banner only re-checks on resume. |
 
 ## File-by-file reference
 
@@ -274,39 +345,58 @@ Every fetch is logged to the server console with the calling IP and a truncated 
 
 **`server.py`** — Flask app + Whisper + tmux router.
 - `get_whisper()` — lazily loads the `faster-whisper` model on first call, caches it.
-- `paste_into_focused_window(text, submit)` — clipboard + `Ctrl+V` + optional Enter (via pyautogui).
-- `resolve_tmux_target(target)` — resolves `'auto'` to the most-recently-attached tmux session by parsing `tmux list-sessions -F '#{session_last_attached} #{session_name}'`.
-- `tmux_send(session, text)` — runs `tmux send-keys -t <session> -l <text>` then `tmux send-keys -t <session> Enter`. Literal-text mode avoids tmux key-name misinterpretation.
-- `index()` — serves the PWA.
-- `health()` — diagnostics.
-- `active_session()` — returns the currently-auto-resolvable tmux session (used by the phone's live pill).
-- `send()` — JSON text → PC paste.
-- `transcribe_and_send()` — audio → Whisper → routes to tmux / clipboard / PC paste based on headers.
+- `_is_allowed_origin(ip)` — Tailnet (`100.64.0.0/10`) + loopback. Used to gate every sensitive endpoint.
+- `_gate_origin()` / `_gate_token()` — request-time guards. Return a Flask 403/401 response if the request fails the check, else None.
+- `_redact(s)` — token-redaction helper used in every log line that touches a credential.
+- `_deliver_lock` — single threading.Lock serializing pyautogui paste and tmux send-keys.
+- `paste_into_focused_window(text, submit)` — clipboard + `Ctrl+V` + optional Enter, held under `_deliver_lock`.
+- `_wsl_warmup()` — boot-time thread that runs `wsl -- true` to wake the distro before first request.
+- `resolve_tmux_target(target)` — resolves `'auto'` to the most-recently-attached tmux session by parsing `tmux list-sessions -F '#{session_last_attached} #{session_name}'` (wrapped in `bash -lc` to survive `wsl.exe` arg parsing).
+- `tmux_send(session, text)` — runs `tmux send-keys -t <session> -l <text>` then `tmux send-keys -t <session> Enter`, held under `_deliver_lock`. Literal-text mode avoids tmux key-name misinterpretation.
+- `_route_text(...)` — shared routing logic (tmux first, then PC paste if explicitly enabled). Used by both `/transcribe_and_send` and `/send`.
+- `_run_server_checks()` — server-side health checks (whisper / WSL / tmux / auto-resolve / token default). Consumed by `/diagnose`.
+- `index()` / `health()` — static and liveness probes (open).
+- `active_session()` / `sessions()` / `diagnose()` / `keyfile()` / `send()` / `transcribe_and_send()` — Tailnet-gated routes.
 - `_preload()` — background-thread Whisper warm-up.
 
 **`requirements.txt`** — Flask, pyperclip, pyautogui, faster-whisper.
 
-**`start.bat`** — Windows one-click launcher.
+**`start.bat`** — Windows one-click launcher (foreground console; uses venv). Token no longer echoed.
+
+**`tools/server-watchdog.ps1`** — autostart wrapper. Runs python in a `cmd.exe` redirect (preserves UTF-8), captures stdout/stderr to `tools/logs/server.log`, rotates at 10 MB (keeps 5), restarts on exit with exponential backoff capped at 5 min, single-instance lock at `tools/logs/watchdog.lock`. Pointed at by the `STT Server.lnk` shortcut in the user's Startup folder.
+
+**`tools/diagnose.ps1`** — end-to-end self-diagnose. See [Self-diagnose tool](#self-diagnose-tool).
 
 **`static/index.html`** — PWA client (text-only, alternate).
 
 ### Android app (`stt-android/`)
 
-**`AndroidManifest.xml`** — permissions (`INTERNET`, `RECORD_AUDIO`, `SYSTEM_ALERT_WINDOW`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS`), `MainActivity`, `OverlayService` (`foregroundServiceType="microphone"`), and `SttAccessibilityService` with `BIND_ACCESSIBILITY_SERVICE`.
+**`AndroidManifest.xml`** — permissions (`INTERNET`, `RECORD_AUDIO`, `SYSTEM_ALERT_WINDOW`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS`), `MainActivity`, `InfoActivity`, `DiagnosticsActivity` (both `exported="false"`), `OverlayService` (`foregroundServiceType="microphone"`), and `SttAccessibilityService` with `BIND_ACCESSIBILITY_SERVICE`.
 
 **`MainActivity.kt`** — settings screen.
-- `onCreate()` — inflates the UI and restores saved settings.
+- `onCreate()` — inflates the UI and restores saved settings; wires up the `?` info button and `Run diagnostics` button.
+- `onResume()` — re-checks accessibility-service status and shows/hides the warning banner.
+- `isAccessibilityServiceEnabled()` — parses `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES`.
 - `savePrefs()` — writes all prefs to SharedPreferences.
 - `startFlow()` / `requestNotifIfNeeded()` / `maybeRequestOverlay()` — permission chain.
-- `launchOverlay()` — starts OverlayService.
+- `launchOverlay()` — starts `OverlayService`.
+
+**`InfoActivity.kt`** — about-this-app screen reached from the `?` button. Static HTML content explaining the architecture, the claude-sessions-app pairing, the Tailscale-only connectivity, the routing rules, the safety toggles, and the privacy posture.
+
+**`DiagnosticsActivity.kt`** — in-app self-diagnose screen reached from the `Run diagnostics` button. Runs phone-local checks (URL/token, RECORD_AUDIO/overlay/accessibility perms, bubble service alive, WAV queue size, network reachability, token accepted) plus calls the server's `/diagnose` and renders a colored monospace report.
 
 **`OverlayService.kt`** — floating bubble + routing.
-- `setupBubble()` — builds the bubble + target-label pill in a vertical `LinearLayout` overlay.
-- `refreshTargetLabel()` — shows `→ ses3` / `→ 📋` / blank based on current mode.
-- `pollRunnable` — Handler-based poller (every 4 s) that calls `SttClient.fetchActiveSession` when auto-detect is on.
-- `attachTouchListener()` — tap/drag discrimination; tap toggles recording.
-- `startRecording()` / `stopAndUpload()` — `WavRecorder` lifecycle + HTTP upload.
-- Post-response branch: tmux mode → toast; clipboard mode → `ClipboardManager.setPrimaryClip` + optional broadcast to `SttAccessibilityService`; default → PC-paste toast.
+- `setupBubble()` — builds the bubble + target-label pill + tap-to-pick menu + confirm row (✓/✗ buttons) in a vertical `LinearLayout` overlay.
+- `refreshTargetLabel()` — shows `ses1` / `• ses2` / `📋` / `(searching…)` / `⚠ ses2` based on current state.
+- `refreshDetectedSession()` — on-demand fetch of `/active_session`. Called on bubble start, on mic tap, and when picking "Auto" from the menu. No idle polling.
+- `expandMenu()` / `collapseMenu()` / `selectSession(name)` / `makeMenuItem(...)` — tap-to-pick menu.
+- `attachTouchListener()` — tap/drag discrimination; tap during confirm-preview cancels it, otherwise tap toggles recording.
+- `startRecording()` / `stopAndUpload()` — `WavRecorder` lifecycle + HTTP upload. Spinner animation on the bubble during transcription.
+- `showConfirmPreview(...)` / `confirmSend()` / `dismissConfirm(...)` — confirm-before-send flow (transcribe-only request, blue preview pill with text, ✓ delivers via `/send`, ✗ or 15 s timeout drops).
+- `drainQueueOpportunistically()` — pops oldest queued WAV (if any) and tries to send; called at the start of each `startRecording()`.
+- Post-response branch: explicit-pick mismatch sets `lastExplicitSendFailed` for the red pill state; clipboard mode dispatches to `handleClipboardDelivery()`; everything else toasts.
+
+**`WavQueue.kt`** — bounded on-disk FIFO (default 10 entries) for failed uploads. `Meta` sidecar JSON preserves the routing flags so retries match the original intent.
 
 **`SttAccessibilityService.kt`** — auto-paste for non-Termux apps.
 - `onServiceConnected()` — registers a package-local broadcast receiver for `ACTION_PASTE`.
@@ -318,17 +408,20 @@ Every fetch is logged to the server console with the calling IP and a truncated 
 - `toWav()` — RIFF/WAVE header writer.
 
 **`SttClient.kt`** — HTTP.
-- `fetchActiveSession(baseUrl, token, onResult)` — GET `/active_session` for the live pill.
-- `send(...)` — JSON POST to `/send`.
-- `sendAudio(baseUrl, token, wav, submit, pasteOnPc, tmuxTarget, onResult)` — WAV POST to `/transcribe_and_send`, with headers selected from phone prefs.
+- `fetchActiveSession(...)` — GET `/active_session` for the pill.
+- `fetchSessions(...)` — GET `/sessions` for the tap-to-pick menu.
+- `sendAudio(..., transcribeOnly = false)` — WAV POST to `/transcribe_and_send`, with `X-Tmux-Session` / `X-Paste` / `X-Submit` / `X-Transcribe-Only` headers from phone prefs.
+- `deliverText(...)` — JSON POST to `/send` for the confirm-tap flow's second step.
 
-**`Prefs.kt`** — SharedPreferences wrapper exposing `serverUrl`, `token`, `clipboardMode`, `clipboardAutoEnter`, and `autoDetectTmux`.
+**`Prefs.kt`** — SharedPreferences wrapper. Keys: `serverUrl`, `token`, `submit`, `clipboardMode`, `clipboardAutoEnter`, `explicitTmuxSession`, `pcPasteFallback`, `confirmBeforeSend`. `runMigrations()` strips dead keys from older builds (versioned via `prefs_version`).
 
-**`res/layout/activity_main.xml`** — settings screen fields + switches.
+**`res/layout/activity_main.xml`** — settings screen fields + switches + accessibility banner + `?` button + diagnostics button.
+**`res/layout/activity_info.xml`** — info screen scrollable HTML view + external links.
+**`res/layout/activity_diagnostics.xml`** — diagnostics screen scrollable report + re-run button.
 
-**`res/xml/accessibility_service_config.xml`** — accessibility service capabilities (can retrieve window content, reads focus/text-changed events).
+**`res/xml/accessibility_service_config.xml`** — accessibility service capabilities.
 
-**`res/drawable/bubble_idle.xml`, `bubble_listening.xml`** — blue/red translucent circles.
+**`res/drawable/bubble_idle.xml`, `bubble_listening.xml`, `bubble_transcribing.xml`** — blue idle / red listening / amber transcribing translucent circles.
 
 **`res/values/colors.xml`, `strings.xml`, `themes.xml`** — Material 3 theme + app name + accessibility service description.
 
@@ -340,7 +433,10 @@ Every fetch is logged to the server console with the calling IP and a truncated 
 speech-to-text-app/
 ├── server.py                    # Flask + faster-whisper + tmux router
 ├── requirements.txt
-├── start.bat                    # Windows launcher
+├── start.bat                    # Windows interactive launcher
+├── tools/
+│   ├── server-watchdog.ps1      # Autostart wrapper: rolling logs + restart
+│   └── diagnose.ps1             # Self-diagnose script
 ├── static/
 │   └── index.html               # PWA client (alternate, text-only)
 └── stt-android/                 # Native Android app
@@ -348,22 +444,24 @@ speech-to-text-app/
         ├── AndroidManifest.xml
         ├── java/com/stt/floater/
         │   ├── MainActivity.kt
+        │   ├── InfoActivity.kt
+        │   ├── DiagnosticsActivity.kt
         │   ├── OverlayService.kt
         │   ├── SttAccessibilityService.kt
         │   ├── WavRecorder.kt
+        │   ├── WavQueue.kt
         │   ├── SttClient.kt
         │   └── Prefs.kt
         └── res/
-            ├── layout/activity_main.xml
+            ├── layout/{activity_main,activity_info,activity_diagnostics}.xml
             ├── xml/accessibility_service_config.xml
-            ├── drawable/bubble_idle.xml
-            ├── drawable/bubble_listening.xml
+            ├── drawable/{bubble_idle,bubble_listening,bubble_transcribing}.xml
             └── values/{colors,strings,themes}.xml
 ```
 
 ## Related repo
 
-If you want the tmux-session side of the workflow (named `ses1`, `ses2`, ... sessions pinned to project folders, one dark-mode GUI to configure them, cross-device mirroring), see [**claude-sessions-app**](https://github.com/kevinkicho/claude-sessions-app). STT Floater's `autoDetectTmux` mode pairs naturally with that tool.
+If you want the tmux-session side of the workflow (named `ses1`, `ses2`, ... sessions pinned to project folders, one dark-mode GUI to configure them, cross-device mirroring), see [**claude-sessions-app**](https://github.com/kevinkicho/claude-sessions-app). STT Floater's tmux send-keys routing pairs naturally with that tool — claude-sessions-app provides the named sessions, this app dictates into them.
 
 ## License
 
